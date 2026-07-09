@@ -59,20 +59,15 @@ class CVEDownloader:
             page += 1
             start_index = (page - 1) * results_per_page
 
-            params = {
-                "resultsPerPage": results_per_page,
-                "startIndex": start_index,
-                "noRejected": None,
-            }
-
+            params = {"resultsPerPage": results_per_page, "startIndex": start_index}
             if last_mod_start:
                 params["lastModStartDate"] = last_mod_start
 
-            if self.nvd_api_key:
-                params["apiKey"] = self.nvd_api_key
-
             try:
-                resp = self.session.get(NVD_API, params=params, timeout=120)
+                req_kwargs = {"params": params, "timeout": 120}
+                if self.nvd_api_key:
+                    req_kwargs["headers"] = {"apiKey": self.nvd_api_key}
+                resp = self.session.get(NVD_API, **req_kwargs)
                 if resp.status_code == 403:
                     logger.warning("NVD API rate limited. Use NVD_API_KEY env var for higher limits.")
                     break
@@ -99,9 +94,9 @@ class CVEDownloader:
                 break
 
             if not self.nvd_api_key:
-                time.sleep(6)  # Rate limit: 10 req/min without key
+                time.sleep(6)  # Rate limit: 5 req/30s without key
             else:
-                time.sleep(0.6)  # Rate limit: 100 req/min with key
+                time.sleep(0.1)  # Rate limit: 100 req/60s with key
 
         logger.info(f"NVD download complete: {total} CVEs across {page} pages")
 

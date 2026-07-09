@@ -24,3 +24,5 @@ data/rules/
 
 # User Configurations
 *.local.yaml
+
+data/
