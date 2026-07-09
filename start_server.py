@@ -63,6 +63,7 @@ def main():
         "--cache-type-k", "q4_0",
         "--cache-type-v", "q4_0",
         "--flash-attn", "on",
+        "--jinja",
         "-t", str(args.threads),
         "-b", str(args.batch_size),
         "-ub", str(args.ubatch_size),

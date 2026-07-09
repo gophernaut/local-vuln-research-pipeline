@@ -1,6 +1,7 @@
 """OpenAI-compatible API client for llama-server.
 
-Handles connection, retries, JSON parsing with repair, and self-consistency.
+Handles connection, retries, JSON parsing with repair, Qwen thinking tokens,
+and self-consistency.
 """
 from __future__ import annotations
 
@@ -16,6 +17,10 @@ from src.utils.logger import get_logger
 
 logger = get_logger()
 
+QWEN_THINKING_START = "<|think_start|>"
+QWEN_THINKING_END = "<|think_end|>"
+QWEN_RESPONSE_START = "<|response_start|>"
+
 
 class LLMClient:
     def __init__(self):
@@ -30,7 +35,7 @@ class LLMClient:
         self,
         system: str,
         user: str,
-        temperature: float = 0.0,
+        temperature: float = 0.6,
         max_tokens: int = 2048,
         json_mode: bool = False,
     ) -> str:
@@ -39,7 +44,10 @@ class LLMClient:
             {"role": "user", "content": user},
         ]
 
-        extra: dict[str, Any] = {}
+        extra: dict[str, Any] = {
+            "top_p": 0.95,
+            "extra_body": {"top_k": 20, "presence_penalty": 0.0},
+        }
         if json_mode:
             extra["response_format"] = {"type": "json_object"}
 
@@ -53,6 +61,7 @@ class LLMClient:
                     **extra,
                 )
                 content = resp.choices[0].message.content or ""
+                content = self._strip_thinking(content)
                 return content.strip()
             except (APIConnectionError, RateLimitError) as e:
                 wait = self.retry_delay * (2 ** attempt)
@@ -71,7 +80,7 @@ class LLMClient:
         self,
         system: str,
         user: str,
-        temperature: float = 0.0,
+        temperature: float = 0.6,
         max_tokens: int = 2048,
     ) -> dict[str, Any] | list[Any]:
         raw = self.chat(system, user, temperature, max_tokens, json_mode=True)
@@ -112,6 +121,15 @@ class LLMClient:
 
         return None
 
+    def _strip_thinking(self, text: str) -> str:
+        text = re.sub(
+            r"<\|think_start\|>.*?<\|think_end\|>",
+            "", text, flags=re.DOTALL,
+        )
+        if QWEN_RESPONSE_START in text:
+            text = text.split(QWEN_RESPONSE_START, 1)[-1]
+        return text.strip()
+
     def _parse_json(self, text: str) -> dict | list | None:
         if not text:
             return None
@@ -133,19 +151,20 @@ class LLMClient:
         except json.JSONDecodeError:
             pass
 
-        try:
-            match = re.search(r"\{[\s\S]*\}", text)
-            if match:
-                return json.loads(match.group(0))
-        except (json.JSONDecodeError, ValueError):
-            pass
-
-        try:
-            match = re.search(r"\[[\s\S]*\]", text)
-            if match:
-                return json.loads(match.group(0))
-        except (json.JSONDecodeError, ValueError):
-            pass
+        for i, c in enumerate(text):
+            if c in "{[":
+                depth = 0
+                for j in range(i, len(text)):
+                    if text[j] in "{[":
+                        depth += 1
+                    elif text[j] in "}]":
+                        depth -= 1
+                        if depth == 0:
+                            try:
+                                return json.loads(text[i:j + 1])
+                            except json.JSONDecodeError:
+                                break
+                break
 
         return None
 
