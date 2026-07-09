@@ -3,9 +3,14 @@
 
 model:
   name: "Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive"
-  quant: "IQ4_XS"
-  file: "models/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ4_XS.gguf"
-  download_url: "https://huggingface.co/HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive/resolve/main/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ4_XS.gguf"
+  quant: "IQ3_M"
+  file: "models/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ3_M.gguf"
+  download_url: "https://huggingface.co/HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive/resolve/main/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ3_M.gguf"
+  quant_options:
+    iq4_xs: "models/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ4_XS.gguf"  # 19GB, partial VRAM
+    iq3_m: "models/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ3_M.gguf"     # 15GB, fits VRAM
+    iq4_nl: "models/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ4_NL.gguf"   # 20GB, partial VRAM
+    q4_k_m: "models/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf"   # 21GB, heavy offload
 
 server:
   host: "127.0.0.1"

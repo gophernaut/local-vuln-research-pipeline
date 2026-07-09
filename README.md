@@ -76,15 +76,23 @@ Tested on: RTX 4070 Ti SUPER (16GB), Ryzen 7 7700, 32GB DDR5
 
 ### 1. Download model
 
-Download the IQ4_XS GGUF quant from HuggingFace:
+Download the IQ3_M GGUF quant (recommended for 16GB VRAM — fits fully in GPU memory, no PCIe bottleneck):
 
 ```
 huggingface-cli download HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive \
-  Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ4_XS.gguf \
+  Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ3_M.gguf \
   --local-dir models/
 ```
 
-Place the `.gguf` file in `D:\Local vuln model\models\`
+Or choose a different quant for your hardware:
+
+| Quant | Size | Best for |
+|-------|------|----------|
+| `IQ3_M` | 15 GB | 16GB VRAM — full GPU fit, zero PCIe latency |
+| `IQ4_XS` | 19 GB | 24GB VRAM — better quality, full fit |
+| `Q4_K_M` | 21 GB | 32GB VRAM — best quality |
+
+Place the `.gguf` file in `models/`
 
 ### 2. Install dependencies
 
@@ -146,7 +154,7 @@ python -m src.main audit C:\path\to\target-repo
 | `python -m src.main eval` | Run evaluation against known-vuln corpora |
 | `python -m src.main audit <path>` | Full audit pipeline |
 | `python -m src.main audit <path> --resume` | Resume from checkpoint |
-| `python start_server.py` | Start llama-server (--port, --threads, --ncmoe, --context) |
+| `python start_server.py` | Start llama-server (--port, --threads, --ncmoe, --context, --quant) |
 | `python run_benchmark.py` | Run benchmark with server check |
 | `python run_audit.py <path>` | Audit with authorization prompt (--resume) |
 

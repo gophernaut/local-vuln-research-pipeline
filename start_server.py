@@ -11,8 +11,16 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-MODEL_PATH = ROOT / "models" / "Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ4_XS.gguf"
+MODEL_PATH = ROOT / "models" / "Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ3_M.gguf"
 DOWNLOAD_URL = "https://huggingface.co/HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive"
+
+QUANT_OPTIONS = {
+    "iq3_m": ("Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ3_M.gguf", "15 GB, fits 16GB VRAM fully"),
+    "iq4_xs": ("Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ4_XS.gguf", "19 GB, partial VRAM, PCIe expert misses"),
+    "iq4_nl": ("Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ4_NL.gguf", "20 GB, partial VRAM"),
+    "q4_k_m": ("Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf", "21 GB, heavy offloading"),
+    "q4_k_p": ("Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_P.gguf", "23 GB, heavy offloading"),
+}
 
 
 def main():
@@ -24,21 +32,28 @@ def main():
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--batch-size", "-b", type=int, default=1024)
     parser.add_argument("--ubatch-size", "-ub", type=int, default=512)
+    parser.add_argument("--quant", choices=list(QUANT_OPTIONS.keys()), default="iq3_m",
+                       help="Quantization to use")
     args = parser.parse_args()
 
-    if not MODEL_PATH.exists():
-        print(f"[!] Model not found: {MODEL_PATH}")
+    model_file = ROOT / "models" / QUANT_OPTIONS[args.quant][0]
+    if not model_file.exists():
+        print(f"[!] Model not found: {model_file}")
         print(f"[!] Download from: {DOWNLOAD_URL}")
-        print(f"[!] Place the IQ4_XS.gguf file in: {MODEL_PATH.parent}")
+        print(f"\nAvailable quants (size for 16GB VRAM):")
+        for q, (fname, note) in QUANT_OPTIONS.items():
+            print(f"  --quant {q:<10} {fname:<55} {note}")
+        print(f"\nRecommended: --quant iq3_m  (fits fully in 16GB VRAM, no PCIe latency)")
         sys.exit(1)
 
     print(f"[+] Starting llama-server on http://{args.host}:{args.port}")
-    print(f"[+] Model: {MODEL_PATH.name}")
+    print(f"[+] Model: {model_file.name}")
+    print(f"[+] Quant: {args.quant}  ({QUANT_OPTIONS[args.quant][1]})")
     print(f"[+] Context: {args.context:,} tokens | Threads: {args.threads} | NCMOE: {args.ncmoe}")
 
     cmd = [
         "llama-server",
-        "-m", str(MODEL_PATH),
+        "-m", str(model_file),
         "--host", args.host,
         "--port", str(args.port),
         "-ngl", "999",
