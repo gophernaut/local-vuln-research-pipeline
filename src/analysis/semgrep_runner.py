@@ -70,7 +70,14 @@ class SemgrepRunner:
         ]
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=600,
+            )
             if result.returncode not in (0, 1):
                 logger.error(f"Semgrep error: {result.stderr[:500]}")
                 return []
@@ -99,7 +106,14 @@ class SemgrepRunner:
                 str(repo_path),
             ]
             try:
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=300,
+                )
                 if result.returncode in (0, 1):
                     all_findings.extend(self._parse_output(result.stdout))
             except (subprocess.TimeoutExpired, Exception):
