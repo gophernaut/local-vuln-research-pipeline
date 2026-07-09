@@ -8,6 +8,7 @@ Supports:
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -147,24 +148,43 @@ class CVEDatabase:
 
     def _fts_search(self, query: str, limit: int = 100) -> list[Any]:
         assert self.conn
-        try:
-            rows = self.conn.execute(
-                """SELECT v.* FROM vulnerabilities v
-                JOIN vulnerabilities_fts fts ON v.rowid = fts.rowid
-                WHERE vulnerabilities_fts MATCH ?
-                ORDER BY v.kev_member DESC, v.epss_score DESC, v.cvss_score DESC
-                LIMIT ?""",
-                (query, limit),
-            ).fetchall()
-            return rows
-        except sqlite3.OperationalError:
+
+        # Clean query for FTS5: remove chars that break FTS5 syntax
+        clean = re.sub(r'[#\-\.,;:()\[\]{}!\"\'\\/]', ' ', query)
+        clean = ' '.join(clean.split())
+
+        if clean:
+            try:
+                rows = self.conn.execute(
+                    """SELECT v.* FROM vulnerabilities v
+                    JOIN vulnerabilities_fts fts ON v.rowid = fts.rowid
+                    WHERE vulnerabilities_fts MATCH ?
+                    ORDER BY v.kev_member DESC, v.epss_score DESC, v.cvss_score DESC
+                    LIMIT ?""",
+                    (clean, limit),
+                ).fetchall()
+                if rows:
+                    return rows
+            except sqlite3.OperationalError:
+                pass
+
+        # Fallback: OR-based LIKE for each word
+        words = [w.strip() for w in clean.split() if len(w.strip()) > 1]
+        if not words:
+            words = [q for q in query.replace('#', ' ').split() if len(q) > 1]
+
+        if words:
+            placeholders = ' OR '.join(['description LIKE ?' for _ in words])
+            params = [f'%{w}%' for w in words] + [limit]
             return self.conn.execute(
-                """SELECT * FROM vulnerabilities
-                WHERE description LIKE ?
+                f"""SELECT * FROM vulnerabilities
+                WHERE ({placeholders})
                 ORDER BY kev_member DESC, epss_score DESC, cvss_score DESC
                 LIMIT ?""",
-                (f"%{query}%", limit),
+                params,
             ).fetchall()
+
+        return []
 
     def _rank(self, row: sqlite3.Row) -> float:
         score = 0.0

@@ -69,19 +69,16 @@ class ContextManager:
                 content=content,
             )
 
+        budget_lines = budget * 4
         if line_count == 0:
             return None
 
-        budget_lines = budget * 4
-
-        with open(Path(filepath), encoding="utf-8", errors="replace") as f:
-            pass
-
+        # Try function-boundary chunking via tree-sitter
         try:
-            import tree_sitter_python as tspy
             import tree_sitter as ts
-            lang = tspy.language()
-            parser = ts.Parser(ts.Language(lang))
+            import tree_sitter_python as tspy
+            lang_obj = tspy.language()
+            parser = ts.Parser(ts.Language(lang_obj))
             tree = parser.parse(content.encode("utf-8"))
             root = tree.root_node
 
@@ -91,6 +88,7 @@ class ContextManager:
         except Exception:
             pass
 
+        # Fallback: first N lines
         truncated = "\n".join(lines[:budget_lines])
         return CodeChunk(
             file=filepath,
