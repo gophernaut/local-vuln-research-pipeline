@@ -1,7 +1,8 @@
-"""Step 5: Hypothesis generation — LLM generates ranked exploit hypotheses.
+"""Step 5: Hypothesis generation — LLM generates exploit hypotheses from code analysis.
 
-Each hypothesis: vulnerability class, entry point, sink, preconditions, confidence.
-Self-consistency applied for hypotheses with confidence <= 0.7.
+Works for ALL target types — web apps, kernel, CLI, native, PowerShell, etc.
+Taint flows from static analysis provide signal boost but are NOT a gate.
+For non-web targets (taint flows = 0), LLM analyzes code directly from file inventory.
 """
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from src.llm.client import LLMClient
-from src.llm.prompts import hypothesis_system
+from src.llm.prompts import hypothesis_system, GUARD_PREAMBLE
 from src.llm.context import ContextManager
 from src.config import config
 from src.utils.logger import get_logger
@@ -27,57 +28,52 @@ def run(
     logger.info("Step 5: Generating exploit hypotheses (LLM)...")
 
     max_hypotheses = config.max_hypotheses
-
     taint_flows = static_analysis.get("_taint_flows", [])
-    if not taint_flows:
-        logger.info("  No taint flows to base hypotheses on. Skipping.")
-        return []
+    sinks = static_analysis.get("_sink_matches", [])
+    semgrep_hits = static_analysis.get("semgrep_findings", [])
+    file_inventory = static_analysis.get("file_inventory", {})
+    summary = static_analysis.get("summary", {})
 
-    high_conf_flows = [f for f in taint_flows if f.get("confidence", 0) >= 0.3]
-    if not high_conf_flows:
-        high_conf_flows = taint_flows[:10]
+    hypothesis_system_prompt = _build_system_prompt(classification, cve_context)
 
-    methodology_ref = _load_methodology_refs(classification)
-    relevant_cwes = list(set(f.get("cwe", "") for f in high_conf_flows if f.get("cwe")))
+    user_prompt = _build_user_prompt(
+        classification, summary, taint_flows, sinks, semgrep_hits, file_inventory
+    )
 
-    cve_text = _format_cve_context(cve_context)
-
-    system = hypothesis_system(methodology_ref, cve_text, relevant_cwes)
-
-    user = _build_user_prompt(classification, static_analysis, high_conf_flows)
+    code_samples = _collect_code_samples(repo_path, taint_flows, sinks, file_inventory)
 
     client = LLMClient()
     ctx = ContextManager()
+    alloc = ctx.allocate(hypothesis_system_prompt, code_files=code_samples)
 
-    code_files = _collect_relevant_files(repo_path, high_conf_flows)
-    alloc = ctx.allocate(system, cve_context="", code_files=code_files)
-
-    full_user = f"{alloc['code']}\n\n{user}"
+    full_prompt = (
+        f"{alloc['code']}\n\n"
+        f"=== Repository Analysis ===\n\n{user_prompt}"
+    )
 
     threshold = config.get("thresholds.hypothesis_confidence_cutoff", 0.6)
 
     try:
-        result = client.chat_json(system, full_user, max_tokens=3072)
-        if result:
-            hypotheses = result.get("hypotheses", [])
-        else:
-            hypotheses = []
+        result = client.chat_json(hypothesis_system_prompt, full_prompt, max_tokens=3072)
+        hypotheses = result.get("hypotheses", []) if result else []
     except Exception as e:
         logger.warning(f"  LLM hypothesis gen failed: {e}")
+        hypotheses = []
+
+    if not hypotheses:
+        logger.info("  No hypotheses generated. Target may be secure or LLM unable to parse code.")
         return []
 
-    if threshold >= 0.5 and any(
-        h.get("confidence", 0) <= 0.7 for h in hypotheses
-    ):
-        logger.info(f"  Applying self-consistency check ({config.get('pipeline.self_consistency_runs', 3)} runs)...")
+    if any(h.get("confidence", 0) <= 0.7 for h in hypotheses):
+        logger.info(f"  Self-consistency: {config.get('pipeline.self_consistency_runs', 3)} runs...")
         consistent = client.self_consistent(
-            system, full_user,
+            hypothesis_system_prompt, full_prompt,
             runs=config.get("pipeline.self_consistency_runs", 3),
             temperature=0.3,
         )
         if consistent:
             hypotheses = consistent.get("hypotheses", [])
-            logger.info(f"  Self-consistency passed: {len(hypotheses)} hypotheses")
+            logger.info(f"  {len(hypotheses)} hypotheses after self-consistency")
 
     ranked = sorted(
         hypotheses,
@@ -85,9 +81,8 @@ def run(
         reverse=True,
     )
 
-    top_hypotheses = ranked[:max_hypotheses]
-
-    logger.info(f"  {len(top_hypotheses)} hypotheses generated (from {len(hypotheses)} total)")
+    top = ranked[:max_hypotheses]
+    logger.info(f"  {len(top)} hypotheses (from {len(ranked)} total)")
 
     return [
         {
@@ -103,103 +98,191 @@ def run(
             "cwe_id": h.get("cwe_id", ""),
             "requires_authentication": h.get("requires_authentication", False),
         }
-        for h in top_hypotheses
+        for h in top
     ]
 
 
-def _load_methodology_refs(classification: dict[str, Any]) -> str:
-    refs = classification.get("loaded_refs", [])
+def _build_system_prompt(
+    classification: dict[str, Any],
+    cve_context: list[dict[str, Any]],
+) -> str:
     primary = classification.get("primary_class", "web_app")
+    refs = classification.get("loaded_refs", [])
 
-    ref_text = f"Primary methodlogy: {primary} vulnerability research.\n"
-    if refs:
-        ref_text += f"Loaded references: {', '.join(refs)}\n"
-    return ref_text
+    methodology = f"Target class: {primary}. References: {', '.join(refs)}."
 
+    cve_text = "No known CVE patterns available."
+    if cve_context:
+        lines = []
+        for cve in cve_context[:15]:
+            kev = " [CISA KEV — actively exploited]" if cve.get("kev_member") else ""
+            lines.append(
+                f"- {cve.get('cve_id')}: {cve.get('description', '')[:200]} "
+                f"(CVSS: {cve.get('cvss_score')}, EPSS: {cve.get('epss_score') or 0:.4f}){kev}"
+            )
+        cve_text = "\n".join(lines)
 
-def _format_cve_context(cve_context: list[dict[str, Any]]) -> str:
-    if not cve_context:
-        return "No known CVE patterns available for this tech stack."
+    return f"""{GUARD_PREAMBLE}
 
-    lines = []
-    for cve in cve_context[:15]:
-        kev = " [CISA KEV - actively exploited!]" if cve.get("kev_member") else ""
-        epss = cve.get("epss_score", 0) or 0
-        lines.append(
-            f"- {cve.get('cve_id')}: {cve.get('description', '')[:200]}"
-            f" (CVSS: {cve.get('cvss_score')}, EPSS: {epss:.4f}, CWE: {cve.get('cwe_ids')}){kev}"
-        )
-    return "\n".join(lines)
+You are an elite whitebox vulnerability researcher. Your goal: find 1-3 real,
+HIGH/CRITICAL, unconditionally exploitable vulnerabilities in this codebase.
+You analyze ANY type of target — web apps, kernels, CLI tools, native code,
+PowerShell modules, container runtimes, compilers, embedded systems — everything.
+
+ZERO AI SLOP:
+- NO DoS, ReDoS, resource exhaustion
+- NO theoretical missing checks, security headers
+- NO findings requiring attacker to already have system access
+- NO findings where precondition grants more power than exploit
+- ONLY report concrete, exploitable, traceable vulnerabilities
+
+{methodology}
+
+CVE PATTERNS (most relevant known exploits for this technology):
+{cve_text}
+
+Output valid JSON:
+{{"hypotheses": [
+  {{"vulnerability_class": "e.g. UAF in packet parser, SSRF via webhook, CLI argument injection",
+    "component": "affected file/function",
+    "entry_point": "how attacker reaches this (syscall, HTTP endpoint, CLI arg, IPC msg, file parse)",
+    "entry_point_type": "SYSCALL | HTTP_POST | CLI_ARG | FILE_PARSE | IPC | NETWORK | ENV_VAR | PLUGIN_API",
+    "sink": "dangerous operation and file:line",
+    "preconditions": ["condition 1", "condition 2"],
+    "expected_impact": "concrete impact — RCE, LPE, info leak, auth bypass, code exec",
+    "confidence": 0.0-1.0,
+    "priority_score": 0.0-1.0,
+    "cwe_id": "CWE-XXXX",
+    "requires_authentication": true/false
+  }}
+]}}
+"""
 
 
 def _build_user_prompt(
     classification: dict[str, Any],
-    static_analysis: dict[str, Any],
-    high_conf_flows: list[dict],
+    summary: dict[str, Any],
+    taint_flows: list[dict],
+    sinks: list[dict],
+    semgrep_hits: list[dict],
+    file_inventory: dict[str, Any],
 ) -> str:
-    summary = static_analysis.get("summary", {})
-    entry_points_desc = _describe_entry_points(high_conf_flows)
-    sinks_desc = _describe_sinks(high_conf_flows)
+    primary = classification.get("primary_class", "web_app")
+    display = classification.get("display_name", primary)
 
-    return (
-        f"=== Static Analysis Results ===\n"
-        f"Files analyzed: {summary.get('files_analyzed', 0)}\n"
-        f"Semgrep hits: {summary.get('semgrep_hits', 0)}\n\n"
-        f"=== Entry Points (attacker-controlled inputs) ===\n{entry_points_desc}\n\n"
-        f"=== Dangerous Sinks ===\n{sinks_desc}\n\n"
-        f"=== Target Classification ===\n"
-        f"Class: {classification.get('display_name')}\n"
-        f"Primary: {classification.get('primary_class')}\n\n"
-        f"Generate ranked exploit hypotheses. Focus on HIGH/CRITICAL impact only."
-        f"Limit to top {config.max_hypotheses} most exploitable."
+    lines = [
+        f"Target Classification: {display} ({primary})",
+        f"Files scanned: {summary.get('files_scanned', 0)}",
+        f"Languages: {json.dumps(file_inventory.get('languages', {}))}",
+        f"Semgrep hits: {summary.get('semgrep_hits', 0)}",
+        f"Sinks detected: {summary.get('sinks_found', 0)}",
+        f"Taint flows: {summary.get('taint_flows', 0)}",
+        f"High-confidence flows: {summary.get('high_conf_flows', 0)}",
+    ]
+
+    if taint_flows:
+        lines.append(f"\nHigh-confidence taint flows:")
+        for f in taint_flows[:10]:
+            if f.get("confidence", 0) >= 0.3:
+                lines.append(
+                    f"  {f.get('source_type', '?')} @ {f.get('source_file', '?')}:{f.get('source_line', '?')} "
+                    f"-> {f.get('sink_type', '?')} @ {f.get('sink_file', '?')}:{f.get('sink_line', '?')} "
+                    f"[{f.get('confidence', 0):.2f}]"
+                )
+    else:
+        lines.append("\nNo taint flows detected by static analysis.")
+        lines.append("Analyze the code samples directly to identify potential vulnerabilities.")
+
+    if semgrep_hits:
+        lines.append(f"\nSemgrep findings:")
+        seen: set[str] = set()
+        for hit in semgrep_hits[:20]:
+            key = f"{hit['file']}:{hit['line']}"
+            if key not in seen:
+                seen.add(key)
+                lines.append(f"  {hit['rule_id']} @ {hit['file']}:{hit['line']} [{hit.get('severity', '?')}]")
+
+    lines.append(
+        f"\nGenerate {config.max_hypotheses} highest-priority exploit hypotheses. "
+        f"Analyze the provided code samples. Look for: memory safety bugs, injection, "
+        f"auth bypass, deserialization, path traversal, command injection, race conditions, "
+        f"privilege escalation. Consider the specific threat model for {primary} targets."
     )
 
-
-def _describe_entry_points(flows: list[dict]) -> str:
-    seen: set[str] = set()
-    lines = []
-    for f in flows:
-        key = f"{f.get('source_file')}:{f.get('source_line')}"
-        if key not in seen:
-            seen.add(key)
-            lines.append(
-                f"  {f.get('source_type', 'INPUT')} @ "
-                f"{f.get('source_file', '?')}:{f.get('source_line', '?')}"
-            )
-    return "\n".join(lines) if lines else "  None identified"
+    return "\n".join(lines)
 
 
-def _describe_sinks(flows: list[dict]) -> str:
-    seen: set[str] = set()
-    lines = []
-    for f in flows:
-        key = f"{f.get('sink_file')}:{f.get('sink_line')}"
-        if key not in seen:
-            seen.add(key)
-            lines.append(
-                f"  {f.get('sink_type', 'SINK')} ({f.get('sink_category', '?')}) @ "
-                f"{f.get('sink_file', '?')}:{f.get('sink_line', '?')} "
-                f"[{f.get('cwe', 'N/A')}] confidence: {f.get('confidence', 0):.2f}"
-            )
-    return "\n".join(lines) if lines else "  None identified"
-
-
-def _collect_relevant_files(repo_path: Path, flows: list[dict]) -> dict[str, str]:
-    files = set()
-    for f in flows:
-        src = f.get("source_file", "")
-        sink = f.get("sink_file", "")
-        if src:
-            files.add(repo_path / src)
-        if sink:
-            files.add(repo_path / sink)
-
+def _collect_code_samples(
+    repo_path: Path,
+    taint_flows: list[dict],
+    sinks: list[dict],
+    file_inventory: dict[str, Any],
+) -> dict[str, str]:
     code_files: dict[str, str] = {}
-    for f in list(files)[:20]:
-        if f.exists():
-            try:
-                with open(f, encoding="utf-8", errors="replace") as fh:
-                    code_files[str(f)] = fh.read()
-            except Exception:
-                continue
+    candidates: set[Path] = set()
+    priority: list[tuple[int, Path]] = []
+
+    # Priority 0: entry point files (highest priority)
+    entry_files = _find_entry_files(repo_path, file_inventory)
+    for fp in entry_files:
+        priority.append((0, fp))
+
+    # Priority 1: files with sinks
+    for s in sinks[:30]:
+        fp = repo_path / s["file"]
+        if fp not in {p for _, p in priority}:
+            priority.append((1, fp))
+
+    # Priority 2: files in taint flows
+    for f in taint_flows:
+        sf, df = f.get("source_file", ""), f.get("sink_file", "")
+        for p in [sf, df]:
+            if p:
+                fp = repo_path / p
+                if fp not in {p for _, p in priority}:
+                    priority.append((2, fp))
+
+    # Priority 3: sample files from inventory (sorted by size, largest first — likely important)
+    samples = file_inventory.get("sample_files", [])
+    samples.sort(key=lambda s: -s.get("size", 0))
+    for s in samples[:40]:
+        fp = repo_path / s["path"]
+        if fp not in {p for _, p in priority}:
+            priority.append((3, fp))
+
+    priority.sort(key=lambda x: x[0])
+
+    total_chars = 0
+    max_chars = 100000
+    for _, fp in priority:
+        if total_chars >= max_chars:
+            break
+        if not fp.exists():
+            continue
+        try:
+            content = fp.read_text(errors="replace")
+            if len(content) > 15000:
+                content = content[:15000] + "\n// ... [truncated]"
+            code_files[str(fp.relative_to(repo_path))] = content
+            total_chars += len(content)
+        except Exception:
+            continue
+
     return code_files
+
+
+def _find_entry_files(repo_path: Path, file_inventory: dict) -> list[Path]:
+    entry_patterns = [
+        "**/main.c", "**/main.cpp", "**/main.go", "**/main.rs",
+        "**/Program.cs", "**/Program.java", "**/app.py", "**/index.js",
+        "**/server.js", "**/manage.py", "**/main.ps1",
+        "**/__init__.py", "**/setup.py",
+    ]
+    files = set()
+    for pat in entry_patterns:
+        for fp in repo_path.glob(pat):
+            if fp.is_file() and fp.stat().st_size > 100:
+                files.add(fp)
+                if len(files) >= 10:
+                    return list(files)
+    return list(files)

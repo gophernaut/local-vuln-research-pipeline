@@ -1,19 +1,27 @@
-"""Step 6: Deep code tracing — LLM traces full path from entry point to sink.
+"""Step 6: Iterative deep code tracing.
 
-Verifies each hop against actual code. Checks for mitigations.
-For top-3 hypotheses, Joern CPG can verify taint flow independently.
+LLM traces attack path. If it needs a file not yet provided, it requests it.
+System loads it and continues. Repeats until trace is complete or dead end reached.
+Per-hypothesis checkpointing for long repos (kernel, VS Code, etc.).
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 from src.llm.client import LLMClient
 from src.llm.prompts import deep_trace_system
 from src.llm.context import ContextManager
+from src.config import config, ROOT_DIR
 from src.utils.logger import get_logger
 
 logger = get_logger()
+
+MAX_ITERATIONS = 5
+SKIP_DIRS = {"node_modules", ".git", "__pycache__", ".venv", "venv",
+              "target", "build", "dist", "vendor", ".next", ".nuxt",
+              ".idea", ".vscode", "bin", "obj", "Debug", "Release"}
 
 
 def run(
@@ -21,8 +29,9 @@ def run(
     classification: dict[str, Any],
     hypotheses: list[dict[str, Any]],
     static_analysis: dict[str, Any],
+    checkpoint_dir: Path | None = None,
 ) -> list[dict[str, Any]]:
-    logger.info("Step 6: Deep code tracing (LLM file-by-file)...")
+    logger.info("Step 6: Iterative deep code tracing...")
 
     if not hypotheses:
         logger.info("  No hypotheses to trace.")
@@ -31,121 +40,271 @@ def run(
     client = LLMClient()
     ctx = ContextManager()
 
-    methodology_ref = _load_methodology(classification)
-    system = deep_trace_system(methodology_ref)
+    methodology = _methodology_for(classification.get("primary_class", "general_application"))
+    system = deep_trace_system(methodology)
 
     results = []
     max_trace = min(len(hypotheses), 10)
 
     for i, hyp in enumerate(hypotheses[:max_trace]):
-        logger.info(f"  Tracing hypothesis {i + 1}/{min(len(hypotheses), max_trace)}: {hyp.get('vulnerability_class', '?')}")
+        hyp_class = hyp.get("vulnerability_class", "?")
+        hyp_id = f"hyp_{i}"
+        logger.info(f"  [{i + 1}/{min(len(hypotheses), max_trace)}] {hyp_class}")
 
-        component = hyp.get("component", "")
-        entry = hyp.get("entry_point", "")
-        sink = hyp.get("sink", "")
+        # Try resume from per-hypothesis checkpoint
+        trace_result = _load_hyp_checkpoint(checkpoint_dir, hyp_id) if checkpoint_dir else None
+        iteration_start = trace_result.get("_iteration", 0) if trace_result else 0
+        loaded_files: set[str] = set(trace_result.get("_loaded_files", []) if trace_result else [])
 
-        relevant_files = _find_relevant_files(repo_path, component, entry, sink, static_analysis)
-        code_files = _read_files(relevant_files, repo_path)
+        if trace_result and trace_result.get("exploitable") is not None:
+            logger.info(f"    Resumed from checkpoint: exploitable={trace_result.get('exploitable')}")
+            trace_result["hypothesis_index"] = i
+            trace_result["hypothesis_class"] = hyp_class
+            trace_result["hypothesis_confidence"] = hyp.get("confidence")
+            results.append(trace_result)
+            continue
 
-        user = (
-            f"Trace the exploit path for this hypothesis:\n\n"
-            f"Vulnerability class: {hyp.get('vulnerability_class')}\n"
-            f"Affected component: {component}\n"
-            f"Entry point: {entry} (type: {hyp.get('entry_point_type')})\n"
-            f"Expected sink: {sink}\n"
-            f"Preconditions: {hyp.get('preconditions')}\n"
-            f"Expected impact: {hyp.get('expected_impact')}\n\n"
-            f"Trace the FULL data flow from entry point through every function call, "
-            f"variable assignment, and transformation to the sink.\n"
-            f"Each hop MUST cite exact file:line. Check for any mitigations (sanitization, "
-            f"auth checks, input validation, parameterization) at each step.\n"
-        )
+        for iteration in range(iteration_start, MAX_ITERATIONS):
+            if iteration == 0 and not trace_result:
+                initial_files = _find_initial_files(repo_path, hyp, static_analysis)
+                for fp in initial_files:
+                    loaded_files.add(str(fp.relative_to(repo_path)))
+                code_bundle = _read_files(initial_files, repo_path, loaded_files)
+                user = _build_initial_prompt(hyp, code_bundle)
+            else:
+                missing_files = _resolve_requested_files(repo_path, trace_result or {}, loaded_files)
+                if not missing_files:
+                    break
+                logger.info(f"    Iter {iteration + 1}: loading {len(missing_files)} requested files")
+                code_bundle = _read_files(missing_files, repo_path, loaded_files)
+                user = (
+                    "CONTINUE tracing. New files loaded:\n\n"
+                    f"{_assemble_code(loaded_files, code_bundle)}\n\n"
+                    "Continue the trace. Output same JSON format with 'needs_more_files': true if you still need files."
+                )
 
-        alloc = ctx.allocate(system, code_files=code_files)
-        full_prompt = f"{user}\n\n=== Source Code ===\n{alloc['code']}"
+            alloc = ctx.allocate(system, code_files={})
+            full_prompt = f"{user}\n\n=== Source Code ===\n{_assemble_code(loaded_files, code_bundle)}"
 
-        try:
-            result = client.chat_json(system, full_prompt, max_tokens=3072)
-            if result:
-                result["hypothesis_index"] = i
-                result["hypothesis_class"] = hyp.get("vulnerability_class")
-                result["hypothesis_confidence"] = hyp.get("confidence")
-                results.append(result)
+            try:
+                result = client.chat_json(system, full_prompt, max_tokens=3072, temperature=0.3)
+            except Exception as e:
+                logger.warning(f"    Trace error: {e}")
+                result = {"error": str(e), "reachable": False, "exploitable": False}
 
-                if result.get("exploitable") and result.get("reachable"):
-                    logger.info(f"    EXPLOITABLE - {result.get('summary', '')[:100]}")
-                    if config.get("pipeline.early_termination", True):
-                        logger.info("    Early termination: confirmed HIGH/CRIT finding")
-                        break
-                elif result.get("blocked_by"):
-                    logger.info(f"    BLOCKED: {result['blocked_by']}")
-                else:
-                    logger.info(f"    Not exploitable: {result.get('summary', '')[:100]}")
-        except Exception as e:
-            logger.warning(f"    Trace failed: {e}")
-            results.append({
-                "hypothesis_index": i,
-                "error": str(e),
-                "reachable": False,
-                "exploitable": False,
-            })
+            if not result:
+                result = {"reachable": False, "exploitable": False}
+
+            trace_result = result
+            trace_result["_iteration"] = iteration
+            trace_result["_loaded_files"] = list(loaded_files)
+
+            if iteration == 0:
+                trace_result["hypothesis_index"] = i
+                trace_result["hypothesis_class"] = hyp_class
+                trace_result["hypothesis_confidence"] = hyp.get("confidence")
+
+            # Save checkpoint after each iteration
+            if checkpoint_dir:
+                _save_hyp_checkpoint(checkpoint_dir, hyp_id, trace_result)
+
+            if _needs_more_files(result):
+                continue
+            else:
+                break
+
+        if trace_result:
+            if trace_result.get("exploitable") and trace_result.get("reachable"):
+                logger.info(f"    EXPLOITABLE — {trace_result.get('summary', '')[:120]}")
+            elif trace_result.get("blocked_by"):
+                logger.info(f"    BLOCKED: {trace_result['blocked_by'][:120]}")
+            else:
+                logger.info(f"    Result: {trace_result.get('summary', '')[:120]}")
+            trace_result["files_traced"] = list(loaded_files)
+            results.append(trace_result)
+        else:
+            results.append({"hypothesis_index": i, "error": "no result", "reachable": False, "exploitable": False})
 
         ctx.reset_dedup()
 
     return results
 
 
-def _load_methodology(classification: dict[str, Any]) -> str:
-    primary = classification.get("primary_class", "web_app")
-    refs = classification.get("loaded_refs", [])
-
-    methodology_map = {
-        "web_app": "Trace HTTP request -> middleware chain -> handler -> service -> data layer.",
-        "native_memory": "Trace input -> memory allocation -> buffer operation -> overflow/UAF.",
-        "kernel": "Trace syscall/ioctl -> copy_from_user -> validation -> kernel operation.",
-        "java_platform": "Trace HTTP/deserialization -> filter chain -> controller -> service -> sink.",
-        "dotnet": "Trace HTTP/deserialization -> middleware -> controller -> service -> sink.",
-        "distributed": "Trace API call -> proxy/gateway -> service handler -> internal call -> sink.",
-        "cli_tool": "Trace CLI arg/env var -> argument parser -> execution/dynamic eval -> sink.",
-    }
-
-    return methodology_map.get(primary, "Trace from entry point through all intermediaries to the sink.")
+def _save_hyp_checkpoint(checkpoint_dir: Path, hyp_id: str, result: dict):
+    if not checkpoint_dir:
+        return
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    path = checkpoint_dir / f"trace_{hyp_id}.json"
+    try:
+        with open(path, "w") as f:
+            json.dump(result, f, indent=2, default=str)
+    except Exception:
+        pass
 
 
-def _find_relevant_files(
-    repo_path: Path,
-    component: str,
-    entry: str,
-    sink: str,
-    static_analysis: dict[str, Any],
+def _load_hyp_checkpoint(checkpoint_dir: Path, hyp_id: str) -> dict | None:
+    if not checkpoint_dir:
+        return None
+    path = checkpoint_dir / f"trace_{hyp_id}.json"
+    if path.exists():
+        try:
+            with open(path) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return None
+
+
+def _needs_more_files(result: dict) -> bool:
+    need = result.get("needs_more_files", False)
+    if need:
+        return True
+    trace = result.get("trace", [])
+    for hop in trace:
+        desc = str(hop.get("description", "")).lower()
+        if "need" in desc and ("file" in desc or "code" in desc or "source" in desc):
+            return True
+    return False
+
+
+def _resolve_requested_files(
+    repo_path: Path, result: dict, loaded: set[str]
 ) -> list[Path]:
     files = set()
+    for field in ["missing_file", "needs_file", "_requested_files"]:
+        val = result.get(field, "")
+        if isinstance(val, list):
+            for v in val:
+                for fp in repo_path.rglob(str(v)):
+                    if fp.is_file() and not _skip(fp):
+                        files.add(fp)
+        elif val:
+            for fp in repo_path.rglob(str(val)):
+                if fp.is_file() and not _skip(fp):
+                    files.add(fp)
 
-    for sink_match in static_analysis.get("_sink_matches", []):
-        files.add(repo_path / sink_match["file"])
+    trace = result.get("trace", [])
+    for hop in trace:
+        if isinstance(hop, dict):
+            for v in hop.values():
+                for fp in repo_path.rglob(str(v)):
+                    if fp.is_file() and not _skip(fp):
+                        files.add(fp)
+
+    # Fallback: search for file paths mentioned in trace descriptions
+    for hop in trace:
+        desc = str(hop.get("description", "")) + " " + str(hop.get("file", ""))
+        import re as _re
+        for match in _re.finditer(r'[\w/\-]+\.\w+', desc):
+            name = match.group(0)
+            for fp in repo_path.rglob(name):
+                if fp.is_file() and not _skip(fp):
+                    files.add(fp)
+
+    return [f for f in files if str(f.relative_to(repo_path)) not in loaded][:10]
+
+
+def _find_initial_files(
+    repo_path: Path, hyp: dict[str, Any], static_analysis: dict[str, Any]
+) -> list[Path]:
+    files: set[Path] = set()
+
+    for field in ["component", "entry_point", "sink"]:
+        val = str(hyp.get(field, ""))
+        for part in val.replace(":", "/").replace("\\", "/").split("/"):
+            part = part.strip().rstrip(".)]}>")
+            if len(part) > 2:
+                for fp in repo_path.rglob(f"*{part}*"):
+                    if fp.is_file() and not _skip(fp):
+                        files.add(fp)
+
+    for hit in static_analysis.get("semgrep_findings", []):
+        files.add(repo_path / hit["file"])
+
+    for sink in static_analysis.get("_sink_matches", []):
+        files.add(repo_path / sink["file"])
 
     for flow in static_analysis.get("_taint_flows", []):
-        sf = flow.get("source_file", "")
-        df = flow.get("sink_file", "")
-        if sf:
-            files.add(repo_path / sf)
-        if df:
-            files.add(repo_path / df)
+        sf, df = flow.get("source_file", ""), flow.get("sink_file", "")
+        if sf: files.add(repo_path / sf)
+        if df: files.add(repo_path / df)
 
-    for semgrep in static_analysis.get("semgrep_findings", []):
-        files.add(repo_path / semgrep["file"])
+    for sample in static_analysis.get("file_inventory", {}).get("sample_files", [])[:15]:
+        files.add(repo_path / sample["path"])
 
-    existing = [f for f in files if f.exists()]
-    return existing[:15]
+    entry_names = ["main.c", "main.cpp", "main.go", "main.rs", "Program.cs",
+                   "Program.java", "index.js", "app.py", "manage.py",
+                   "setup.py", "main.ps1", "__init__.py", "main.cmake"]
+    for name in entry_names:
+        for fp in repo_path.rglob(name):
+            if fp.is_file() and not _skip(fp):
+                files.add(fp)
+
+    return [f for f in files if f.exists()][:25]
 
 
-def _read_files(paths: list[Path], repo_root: Path) -> dict[str, str]:
+def _read_files(paths: list[Path], repo_root: Path, loaded: set[str]) -> dict[str, str]:
     code_files: dict[str, str] = {}
+    total = 0
     for f in paths:
+        if total > 150000:
+            break
+        rel = str(f.relative_to(repo_root))
+        if rel in loaded:
+            continue
         try:
-            rel = str(f.relative_to(repo_root))
-            with open(f, encoding="utf-8", errors="replace") as fh:
-                code_files[rel] = fh.read()
+            content = f.read_text(errors="replace")
+            if len(content) > 12000:
+                content = content[:12000] + "\n// ... [truncated]"
+            code_files[rel] = content
+            loaded.add(rel)
+            total += len(content)
         except Exception:
             continue
     return code_files
+
+
+def _assemble_code(loaded: set[str], bundle: dict[str, str]) -> str:
+    parts = []
+    for fname in sorted(loaded):
+        if fname in bundle:
+            parts.append(f"--- {fname} ---\n{bundle[fname]}\n")
+    return "\n".join(parts) if parts else "(no code available)"
+
+
+def _build_initial_prompt(hyp: dict, code_bundle: dict) -> str:
+    return (
+        f"Trace the full exploit path:\n\n"
+        f"Class: {hyp.get('vulnerability_class', '?')}\n"
+        f"Component: {hyp.get('component', '?')}\n"
+        f"Entry: {hyp.get('entry_point', '?')} [{hyp.get('entry_point_type', '?')}]\n"
+        f"Sink: {hyp.get('sink', '?')}\n"
+        f"Preconditions: {hyp.get('preconditions', [])}\n"
+        f"Impact: {hyp.get('expected_impact', '?')}\n\n"
+        f"REQUIREMENTS:\n"
+        f"1. Each hop MUST cite exact file:line from provided code\n"
+        f"2. If you NEED a file not provided, include 'needs_more_files: true' and list filenames\n"
+        f"3. Check ALL mitigations: sanitization, auth, bounds, validation, parameterization"
+    )
+
+
+def _methodology_for(primary: str) -> str:
+    return {
+        "web_app": "Trace HTTP -> middleware -> handler -> service -> data layer.",
+        "kernel": "Trace syscall/ioctl -> copy_from_user -> validation -> kernel op. Check bounds, locking, refcounts.",
+        "native_memory": "Trace input -> allocation -> buffer op. Check bounds, lifetime, allocator.",
+        "java_platform": "Trace HTTP/deserialization -> filter -> controller -> service -> ORM.",
+        "dotnet": "Trace HTTP/deserialization -> middleware -> controller -> service. Check PowerShell invocation.",
+        "powershell": "Trace param/input -> cmdlet/internal API -> dangerous operation (Invoke-Expression, Add-Script, COM). Check input validation.",
+        "compiler": "Trace input file -> lexer/parser -> AST -> codegen. Check parser correctness, bounds, overflow.",
+        "ai_framework": "Trace model input -> deserialization -> graph execution -> native kernel. Check serialization, FFI, memory.",
+        "embedded": "Trace peripheral input -> ISR -> buffer -> processing. Check bounds, interrupt safety, DMA.",
+        "distributed": "Trace API call -> proxy -> handler -> internal RPC. Check auth propagation, trust boundaries.",
+        "container": "Trace API -> runtime -> namespace/cgroup -> host interface. Check capability, mount, escape.",
+        "cli_tool": "Trace CLI arg/env -> parser -> execution/IO. Check injection, traversal, symlink races.",
+        "browser_sandbox": "Trace IPC -> renderer -> browser boundary. Check message validation, sandbox policy.",
+    }.get(primary, "Trace entry point through all intermediaries to sink. Check every guard.")
+
+
+def _skip(p: Path) -> bool:
+    return any(d in p.parts for d in SKIP_DIRS)

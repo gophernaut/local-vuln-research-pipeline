@@ -307,7 +307,7 @@ class Orchestrator:
 
         sa_full = {**sa, "_taint_flows": taint, "_sink_matches": sinks}
         from src.pipeline.step6_deep_trace import run
-        return run(self.repo_path, cl, hyp, sa_full)
+        return run(self.repo_path, cl, hyp, sa_full, self.checkpoint_dir)
 
     def _step7(self):
         traces = self.state.get("trace_results", [])
