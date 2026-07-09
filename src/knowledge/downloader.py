@@ -67,7 +67,21 @@ class CVEDownloader:
                 req_kwargs = {"params": params, "timeout": 120}
                 if self.nvd_api_key:
                     req_kwargs["headers"] = {"apiKey": self.nvd_api_key}
-                resp = self.session.get(NVD_API, **req_kwargs)
+
+                # Retry up to 3 times on connection errors
+                for attempt in range(3):
+                    try:
+                        resp = self.session.get(NVD_API, **req_kwargs)
+                        break
+                    except (requests.exceptions.ConnectionError,
+                            requests.exceptions.ChunkedEncodingError,
+                            requests.exceptions.Timeout) as conn_err:
+                        if attempt < 2:
+                            wait = (2 ** attempt) * 2
+                            logger.warning(f"  Connection error, retrying in {wait}s: {conn_err}")
+                            time.sleep(wait)
+                        else:
+                            raise conn_err
                 if resp.status_code == 403:
                     logger.warning("NVD API rate limited. Use NVD_API_KEY env var for higher limits.")
                     break

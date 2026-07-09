@@ -92,9 +92,14 @@ def _cmd_update_cve():
     importer.import_all()
 
     print("\n[3/3] Generating embeddings for semantic search...")
-    from src.knowledge.embeddings import EmbeddingIndex
-    embedder = EmbeddingIndex()
-    embedder.generate_all()
+    try:
+        from src.knowledge.embeddings import EmbeddingIndex
+        embedder = EmbeddingIndex()
+        embedder.generate_all()
+    except Exception as e:
+        print(f"    [!] Embedding generation skipped: {e}")
+        print(f"    [!] Fix with: pip install tf-keras sentence-transformers")
+        print(f"    [!] FTS5 keyword search works without embeddings.")
 
     print("\n[+] CVE database update complete.")
     from src.knowledge.cve_db import CVEDatabase
