@@ -1,4 +1,4 @@
-"""Unified SQLite importer for NVD, GHSA, EPSS, KEV data.
+"""Unified SQLite importer for NVD, EPSS, KEV data.
 
 Schema: single vulnerabilities table + FTS5 index for hybrid keyword search.
 Embeddings stored as BLOB for semantic (cosine) retrieval.
@@ -76,7 +76,6 @@ class CVEImporter:
         self._load_epss()
         self._load_kev()
         self._import_nvd()
-        self._import_ghsa()
         self._update_fts()
         self._update_meta()
         self._close()
@@ -201,92 +200,6 @@ class CVEImporter:
 
         self.conn.commit()
         logger.info(f"NVD import complete: {imported} CVEs (scanned {total})")
-
-    def _import_ghsa(self):
-        ghsa_dir = RAW_DIR / "ghsa" / "advisories" / "github-reviewed"
-        if not ghsa_dir.exists():
-            logger.info("GHSA data not found. Skipping.")
-            return
-
-        logger.info("Importing GitHub Security Advisories...")
-        count = 0
-
-        for year_dir in sorted(ghsa_dir.glob("*")):
-            if not year_dir.is_dir():
-                continue
-            for json_file in year_dir.glob("*.json"):
-                try:
-                    with open(json_file, encoding="utf-8") as f:
-                        adv = json.load(f)
-                except Exception:
-                    continue
-
-                ghsa_id = adv.get("id", "")
-                aliases = adv.get("aliases", [])
-                cve_id = next((a for a in aliases if a.startswith("CVE-")), ghsa_id)
-
-                desc = adv.get("summary", "") or adv.get("description", "")
-
-                severity = None
-                cvss_score = None
-                cvss_vector = None
-
-                sev_info = adv.get("severity", [])
-                if sev_info:
-                    # GHSA stores severity as list of {type, score}
-                    for s in sev_info:
-                        if s.get("type") == "CVSS_V3" or s.get("type") == "CVSS_V4":
-                            cvss_score = float(s.get("score", 0))
-                            cvss_vector = s.get("vector_string")
-
-                database_specific = adv.get("database_specific", {})
-                cwes_raw = database_specific.get("cwe_ids", [])
-                if isinstance(cwes_raw, list):
-                    cwes = [str(c) for c in cwes_raw]
-                else:
-                    cwes = [str(cwes_raw)] if cwes_raw else []
-
-                affected_list = adv.get("affected", [])
-                packages = []
-                for aff in affected_list:
-                    pkg = aff.get("package", {})
-                    name = pkg.get("name", "")
-                    eco = pkg.get("ecosystem", "")
-                    if name:
-                        packages.append(f"{eco}:{name}")
-
-                epss = self._epss_data.get(cve_id, {})
-                kev_member = 1 if cve_id in self._kev_set else 0
-
-                existing = self.conn.execute(
-                    "SELECT 1 FROM vulnerabilities WHERE id = ?", (cve_id,)
-                ).fetchone()
-
-                if existing:
-                    self.conn.execute(
-                        "UPDATE vulnerabilities SET source = source || ',GHSA' WHERE id = ?",
-                        (cve_id,)
-                    )
-                else:
-                    self._upsert_vuln(
-                        cve_id=cve_id,
-                        source="GHSA",
-                        description=desc,
-                        cvss_score=cvss_score,
-                        cvss_vector=cvss_vector,
-                        severity=severity,
-                        cwe_ids=json.dumps(cwes) if cwes else None,
-                        package_name=packages[0] if packages else None,
-                        epss_score=epss.get("score"),
-                        epss_percentile=epss.get("percentile"),
-                        kev_member=kev_member,
-                        published_date=adv.get("published", ""),
-                        modified_date=adv.get("modified", ""),
-                    )
-                    count += 1
-
-        self.conn.commit()
-        logger.info(f"GHSA import complete: {count} new advisories")
 
     def _extract_cvss(self, cve_data: dict) -> dict:
         metrics = cve_data.get("metrics", {})

@@ -83,7 +83,7 @@ def _cmd_update_cve():
 
     print("=== CVE Database Update ===\n")
 
-    print("[1/3] Downloading from NVD, EPSS, KEV, GHSA...")
+    print("[1/3] Downloading from NVD, EPSS, KEV...")
     downloader = CVEDownloader()
     downloader.download_all()
 

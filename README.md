@@ -9,7 +9,7 @@ Target Repo
     |
 Step 0: Fingerprint + SBOM      (deterministic, all files)
 Step 1: Classify target          (deterministic + LLM confirm)
-Step 2: Dependency vuln scan     (CVE/OSV/GHSA + EPSS/KEV ranked)
+Step 2: Dependency vuln scan     (NVD + EPSS/KEV ranked)
 Step 2b: Secrets scan            (gitleaks rules, all text files)
 Step 3: Full static analysis     (Semgrep + sink finder + call graph + taint)
     |   COVERS 100% OF CODE       (parallel per file, 16 threads)
@@ -30,10 +30,8 @@ Output: 0-2 HIGH/CRIT findings, or "SECURE"
 | Source | Content | Update |
 |--------|---------|--------|
 | NVD CVEList V5 | Full CVE descriptions, CVSS, CWE, CPE | Weekly |
-| OSV.dev | Ecosystem-native vulns (npm, PyPI, Maven, Go, crates.io) | Weekly |
-| GHSA | GitHub Security Advisories | Weekly |
 | EPSS | Exploit prediction scoring (30-day probability) | Daily |
-| CISA KEV | Known Exploited Vulnerabilities catalog | Daily |
+| CISA KEV | Known Exploited Vulnerabilities catalog (1,635 actively exploited) | Daily |
 
 ### Static Analysis (100% Code Coverage)
 
@@ -73,7 +71,8 @@ Output: 0-2 HIGH/CRIT findings, or "SECURE"
 - CPU: Ryzen 7 7700 (8C/16T)
 - RAM: 32GB DDR5 6000MHz
 - Model: Qwen3.6-35B-A3B IQ3_M (15GB, fits VRAM)
-- Performance: **31 tok/s**, 77% GPU utilization, 9.4GB VRAM @ 49K context
+- Performance: **39 tok/s**, 100% JSON compliance, 77% GPU utilization
+- Context: **131,072 tokens** (confirmed usable by benchmark)
 
 ---
 
@@ -155,11 +154,15 @@ Measures throughput, JSON compliance, and optimal context/ncmoe for your hardwar
 
 ### 6. Download CVE database
 
-```
+Get a free NVD API key (30 seconds): https://nvd.nist.gov/developers/request-an-api-key
+
+Then:
+```powershell
+$env:NVD_API_KEY="your-key-here"
 python -m src.main update-cve
 ```
 
-Downloads NVD, EPSS, KEV, GHSA and builds the unified SQLite database with FTS5 + embeddings. First run takes 1-2 hours.
+Downloads NVD (250K+ CVEs), EPSS scores, and CISA KEV. Builds SQLite database with FTS5 + embeddings. ~45 minutes with API key, hours without.
 
 ### 7. Run evaluation (optional)
 
@@ -262,7 +265,7 @@ server:
   port: 8080
   threads: 8
   batch_size: 2048
-  context_length: AUTO   # Set by benchmark
+  context_length: AUTO   # Set by benchmark (131K optimal)
   ncmoe: AUTO            # Set by benchmark
   flash_attn: true
 
@@ -280,8 +283,6 @@ thresholds:
 knowledge:
   sources:
     nvd: true
-    osv: true
-    ghsa: true
     epss: true
     kev: true
 ```
@@ -381,7 +382,7 @@ Hypotheses with confidence <= 0.7 are run 3 times at temperature 0.3. Only findi
       file_utils.py                    Hashing, file collection
       logger.py                        Structured logging
   data/
-    cve/nvd.sqlite                     Unified CVE database
+    cve/nvd.sqlite                    Unified CVE database (NVD + EPSS + KEV)
     eval/                              Eval corpora
     rules/                             Custom semgrep rules
     checkpoints/                       Per-repo audit state
@@ -399,7 +400,7 @@ Hypotheses with confidence <= 0.7 are run 3 times at temperature 0.3. Only findi
 - **You must own or be authorized** to audit target code. The tool prints a warning and requires confirmation before every audit.
 - Generated PoCs are for authorized security research only.
 - The LLM steps require the model server running. Steps 0-4 and 2b run without LLM.
-- First CVE download is large (NVD alone is ~2GB compressed). Allow 1-2 hours for initial database build.
+- First CVE download is large (NVD is ~2GB, 250K+ CVEs). Allow 45 min with free API key.
 - Embedding generation (all-MiniLM-L6-v2) runs on CPU. ~30 minutes for full NVD dataset on 16 threads.
 - GPU utilization looks low in Task Manager. Use `nvidia-smi` for accurate readings.
 - Windows Task Manager reports 3D engine usage differently from compute utilization.

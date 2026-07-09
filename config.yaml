@@ -46,11 +46,8 @@ knowledge:
   embedding_model: "all-MiniLM-L6-v2"
   sources:
     nvd: true
-    osv: true
-    ghsa: true
     epss: true
     kev: true
-    exploitdb: true
 
 checkpoint:
   dir: "data/checkpoints"
