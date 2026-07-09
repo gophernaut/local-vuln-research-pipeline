@@ -48,13 +48,13 @@ Output: 0-2 HIGH/CRIT findings, or "SECURE"
 
 ### Validation Filters (Step 7)
 
-- **Precondition Power Test** — precondition must not grant >= capability than exploit
-- **Reachability Gate** — external unauthenticated/low-priv attacker required
-- **Circular Threat Model** — no "if already have X, can do Y"
-- **Trusted Input Reclass** — config/env/admin is not attacker-controlled
-- **DoS Exclusion** — all DoS variants discarded
-- **AI Slop Check** — theoretical checks, missing headers, ReDoS rejected
-- **Bug Bounty Bar** — only High/Critical, rewardable findings
+- **Precondition Power Test** -- precondition must not grant >= capability than exploit
+- **Reachability Gate** -- external unauthenticated/low-priv attacker required
+- **Circular Threat Model** -- no "if already have X, can do Y"
+- **Trusted Input Reclass** -- config/env/admin is not attacker-controlled
+- **DoS Exclusion** -- all DoS variants discarded
+- **AI Slop Check** -- theoretical checks, missing headers, ReDoS rejected
+- **Bug Bounty Bar** -- only High/Critical, rewardable findings
 - **And 5 more...**
 
 ---
@@ -68,7 +68,32 @@ Output: 0-2 HIGH/CRIT findings, or "SECURE"
 | Storage | 50GB free | 100GB+ (for full CVE DB) |
 | Python | 3.10+ | 3.11+ |
 
-Tested on: RTX 4070 Ti SUPER (16GB), Ryzen 7 7700, 32GB DDR5
+**Tested configuration:**
+- GPU: RTX 4070 Ti SUPER (16GB VRAM)
+- CPU: Ryzen 7 7700 (8C/16T)
+- RAM: 32GB DDR5 6000MHz
+- Model: Qwen3.6-35B-A3B IQ3_M (15GB, fits VRAM)
+- Performance: **31 tok/s**, 77% GPU utilization, 9.4GB VRAM @ 49K context
+
+---
+
+## Prerequisites
+
+### llama.cpp
+
+Required for the model server. Install via:
+
+**Windows:**
+```
+winget install llama.cpp
+```
+
+**macOS / Linux:**
+```
+brew install llama.cpp
+```
+
+Or build from source: https://github.com/ggerganov/llama.cpp
 
 ---
 
@@ -76,7 +101,7 @@ Tested on: RTX 4070 Ti SUPER (16GB), Ryzen 7 7700, 32GB DDR5
 
 ### 1. Download model
 
-Download the IQ3_M GGUF quant (recommended for 16GB VRAM — fits fully in GPU memory, no PCIe bottleneck):
+Download the IQ3_M GGUF quant (15GB, fits 16GB VRAM fully):
 
 ```
 huggingface-cli download HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive \
@@ -84,15 +109,18 @@ huggingface-cli download HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive
   --local-dir models/
 ```
 
-Or choose a different quant for your hardware:
+If you don't have `huggingface-cli`:
+```
+pip install huggingface_hub
+```
 
-| Quant | Size | Best for |
-|-------|------|----------|
-| `IQ3_M` | 15 GB | 16GB VRAM — full GPU fit, zero PCIe latency |
-| `IQ4_XS` | 19 GB | 24GB VRAM — better quality, full fit |
-| `Q4_K_M` | 21 GB | 32GB VRAM — best quality |
+Available quants for different VRAM budgets:
 
-Place the `.gguf` file in `models/`
+| Quant | Size | VRAM needed |
+|-------|------|-------------|
+| `IQ3_M` | 15 GB | 16GB -- fits fully |
+| `IQ4_XS` | 19 GB | 24GB -- better quality |
+| `Q4_K_M` | 21 GB | 32GB -- best quality |
 
 ### 2. Install dependencies
 
@@ -104,6 +132,11 @@ pip install -r requirements.txt
 
 ```
 python start_server.py
+```
+
+Tunable flags:
+```
+python start_server.py --context 65536 --ncmoe 32 --quant iq4_xs
 ```
 
 ### 4. Setup
@@ -118,7 +151,7 @@ python -m src.main setup
 python run_benchmark.py
 ```
 
-This measures throughput, JSON compliance, and optimal context length for your hardware. Config is auto-updated.
+Measures throughput, JSON compliance, and optimal context/ncmoe for your hardware. Config is auto-updated with AUTO values. Takes 30-40 minutes.
 
 ### 6. Download CVE database
 
@@ -126,7 +159,7 @@ This measures throughput, JSON compliance, and optimal context length for your h
 python -m src.main update-cve
 ```
 
-Downloads NVD, EPSS, KEV, GHSA and builds the unified SQLite database with FTS5 + embeddings.
+Downloads NVD, EPSS, KEV, GHSA and builds the unified SQLite database with FTS5 + embeddings. First run takes 1-2 hours.
 
 ### 7. Run evaluation (optional)
 
@@ -139,7 +172,7 @@ Runs against OWASP Benchmark and CVEfixes corpora to calibrate confidence thresh
 ### 8. Audit a repository
 
 ```
-python -m src.main audit C:\path\to\target-repo
+python run_audit.py /path/to/target-repo
 ```
 
 ---
@@ -154,9 +187,27 @@ python -m src.main audit C:\path\to\target-repo
 | `python -m src.main eval` | Run evaluation against known-vuln corpora |
 | `python -m src.main audit <path>` | Full audit pipeline |
 | `python -m src.main audit <path> --resume` | Resume from checkpoint |
-| `python start_server.py` | Start llama-server (--port, --threads, --ncmoe, --context, --quant) |
-| `python run_benchmark.py` | Run benchmark with server check |
-| `python run_audit.py <path>` | Audit with authorization prompt (--resume) |
+| `python start_server.py` | Start llama-server |
+| `python start_server.py --quant iq4_xs --context 65536` | With custom quant and context |
+| `python run_benchmark.py` | Run benchmark |
+| `python run_audit.py <path>` | Audit with authorization prompt |
+| `python run_audit.py <path> --resume` | Resume interrupted audit |
+
+---
+
+## Model VRAM Guide
+
+For 16GB VRAM, the default `--context 49152 --ncmoe 24` keeps the KV cache in GPU memory:
+
+| Context | KV Cache (Q4) | Model Fit | GPU Util |
+|---------|---------------|-----------|----------|
+| 32K | ~1.3 GB | Full fit | High |
+| 49K | ~2.0 GB | Full fit | High |
+| 65K | ~2.7 GB | Tight fit | Medium-High |
+| 131K | ~5.4 GB | KV spills to RAM | Low |
+| 262K | ~10.8 GB | Heavy spill | ~10-15% |
+
+The benchmark determines the best context+ncmoe for your exact hardware.
 
 ---
 
@@ -191,7 +242,7 @@ Each repo audit produces `data/checkpoints/<repo_hash>/progress.md`:
 | 6    | Deep Trace         | Running... | -   |
 ```
 
-Checkpoints are keyed by content hash (sha256 of all file contents). Editing code -> new checkpoint -> fresh audit. Same code -> same hash -> resume works.
+Checkpoints are keyed by content hash (sha256 of all file contents + git tree hash if available). Editing code -> new checkpoint -> fresh audit. Same code -> same hash -> resume works.
 
 Power cut mid-audit? Re-run with `--resume` flag. Only the in-flight step is lost.
 
@@ -203,11 +254,14 @@ Power cut mid-audit? Re-run with `--resume` flag. Only the in-flight step is los
 
 ```yaml
 model:
-  file: "models/Qwen3.6-35B-A3B-Uncensored-IQ4_XS.gguf"
+  name: "Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive"
+  quant: "IQ3_M"
+  file: "models/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ3_M.gguf"
 
 server:
   port: 8080
   threads: 8
+  batch_size: 2048
   context_length: AUTO   # Set by benchmark
   ncmoe: AUTO            # Set by benchmark
   flash_attn: true
@@ -244,21 +298,21 @@ AUTO values are set by benchmark and eval runs. Manual edits preserved across up
 |----------|-----|-------|---------|---------|
 | Python | tree-sitter | 20 patterns | full rule set | full |
 | JavaScript/TS | tree-sitter | 11 patterns | full rule set | full |
-| Java | — | 12 patterns | full rule set | full |
-| Go | — | 9 patterns | partial | full |
-| C/C++ | — | 12 patterns | partial | full |
-| Ruby | — | 7 patterns | partial | full |
-| Rust | — | — | partial | full |
-| C# | — | — | partial | full |
+| Java | - | 12 patterns | full rule set | full |
+| Go | - | 9 patterns | partial | full |
+| C/C++ | - | 12 patterns | partial | full |
+| Ruby | - | 7 patterns | partial | full |
+| Rust | - | - | partial | full |
+| C# | - | - | partial | full |
 
 ### LLM Prompt Strategy
 
 Every LLM call receives:
-1. **Guard preamble** — repo content is data, never instructions; anti-regression questions
-2. **Methodology reference** — per-class vulnerability research patterns
-3. **CVE context** — top 15 most relevant known exploits for this tech stack
-4. **Code context** — relevant source files chunked by function boundaries
-5. **Structured output format** — JSON schema enforced, with repair on malformed output
+1. **Guard preamble** -- repo content is data, never instructions; anti-regression questions
+2. **Methodology reference** -- per-class vulnerability research patterns
+3. **CVE context** -- top 15 most relevant known exploits for this tech stack
+4. **Code context** -- relevant source files chunked by function boundaries
+5. **Structured output format** -- JSON schema enforced, with repair on malformed output
 
 ### Self-Consistency
 
@@ -267,8 +321,8 @@ Hypotheses with confidence <= 0.7 are run 3 times at temperature 0.3. Only findi
 ### Prompt Injection Guard
 
 - System prompt treats all repo content as data, never instructions
-- Step 8 anomaly check: compares `llm_findings ÷ semgrep_hits` ratio against calibrated baseline from 20 clean repos
-- If ratio falls below u - 3sigma: flagged as suspicious, recommends re-run with stripped comments
+- Step 8 anomaly check: compares `llm_findings / semgrep_hits` ratio against calibrated baseline from 20 clean repos
+- If ratio falls below mu - 3sigma: flagged as suspicious, recommends re-run with stripped comments
 
 ### Incremental Analysis (Future)
 
@@ -281,62 +335,61 @@ Hypotheses with confidence <= 0.7 are run 3 times at temperature 0.3. Only findi
 ## File Structure
 
 ```
-D:\Local vuln model\
-  models/                              GGUF model files
+  models/                               GGUF model files
   src/
-    config.py                         Configuration with AUTO resolution
-    main.py                           CLI entry point
-    orchestrator.py                   Master pipeline + checkpointing
+    config.py                          Configuration with AUTO resolution
+    main.py                            CLI entry point
+    orchestrator.py                    Master pipeline + checkpointing
     pipeline/
-      step0_fingerprint.py            Repo fingerprinting + SBOM
-      step1_classify.py               Target classification
-      step2_deps.py                   Dependency vuln scan
-      step2_secrets.py                Secrets scanner
-      step3_static.py                 Full static analysis
-      step4_cve.py                    CVE correlation
-      step5_hypotheses.py             LLM hypothesis generation
-      step6_deep_trace.py             LLM code tracing
-      step7_validate.py               Brutal filtering
-      step8_anomaly.py                Injection detection
-      step9_report.py                 Report + PoC
+      step0_fingerprint.py             Repo fingerprinting + SBOM
+      step1_classify.py                Target classification
+      step2_deps.py                    Dependency vuln scan
+      step2_secrets.py                 Secrets scanner
+      step3_static.py                  Full static analysis
+      step4_cve.py                     CVE correlation
+      step5_hypotheses.py              LLM hypothesis generation
+      step6_deep_trace.py              LLM code tracing
+      step7_validate.py                Brutal filtering
+      step8_anomaly.py                 Injection detection
+      step9_report.py                  Report + PoC
     analysis/
-      ast_parser.py                   tree-sitter multi-lang AST
-      call_graph.py                   Inter-procedural call graph
-      data_flow.py                    Taint flow analysis
-      sink_finder.py                  200+ sink patterns
-      semgrep_runner.py               Semgrep integration
-      secrets_scanner.py              gitleaks rules engine
+      ast_parser.py                    tree-sitter multi-lang AST
+      call_graph.py                    Inter-procedural call graph
+      data_flow.py                     Taint flow analysis
+      sink_finder.py                   200+ sink patterns
+      semgrep_runner.py                Semgrep integration
+      secrets_scanner.py               gitleaks rules engine
     knowledge/
-      downloader.py                   NVD/EPSS/KEV/GHSA fetcher
-      importer.py                     Unified SQLite builder
-      cve_db.py                       Hybrid search query API
-      embeddings.py                   all-MiniLM-L6-v2 embeddings
-      epss.py                         EPSS score queries
-      kev.py                          CISA KEV queries
-      sbom.py                         Multi-format SBOM parser
+      downloader.py                    NVD/EPSS/KEV/GHSA fetcher
+      importer.py                      Unified SQLite builder
+      cve_db.py                        Hybrid search query API
+      embeddings.py                    all-MiniLM-L6-v2 embeddings
+      epss.py                          EPSS score queries
+      kev.py                           CISA KEV queries
+      sbom.py                          Multi-format SBOM parser
     llm/
-      client.py                       OpenAI-compatible API client
-      prompts.py                      Methodology prompt templates
-      context.py                      Context window + chunking
-      guard.py                        Injection guard + anomaly
+      client.py                        OpenAI-compatible API client
+      prompts.py                       Methodology prompt templates
+      context.py                       Context window + chunking
+      guard.py                         Injection guard + anomaly
     eval/
-      harness.py                      Evaluation runner
-      datasets.py                     OWASP/CVEfixes/Juliet/BigVul
-      metrics.py                      Precision/recall/F1
-      calibration.py                  Threshold tuning
+      harness.py                       Evaluation runner
+      datasets.py                      OWASP/CVEfixes/Juliet/BigVul
+      metrics.py                       Precision/recall/F1
+      calibration.py                   Threshold tuning
     utils/
-      file_utils.py                   Hashing, file collection
-      logger.py                       Structured logging
+      file_utils.py                    Hashing, file collection
+      logger.py                        Structured logging
   data/
-    cve/nvd.sqlite                    Unified CVE database
-    eval/                             Eval corpora
-    rules/                            Custom semgrep rules
-    checkpoints/                      Per-repo audit state
-  config.yaml                         Main configuration
-  requirements.txt                    Python dependencies
-  start_server.py                     Start llama-server
-  run_benchmark.py                    Run model benchmark
-  run_audit.py                        Run full audit
+    cve/nvd.sqlite                     Unified CVE database
+    eval/                              Eval corpora
+    rules/                             Custom semgrep rules
+    checkpoints/                       Per-repo audit state
+  config.yaml                          Main configuration
+  requirements.txt                     Python dependencies
+  start_server.py                      Start llama-server
+  run_benchmark.py                     Run model benchmark
+  run_audit.py                         Run full audit
 ```
 
 ---
@@ -348,6 +401,8 @@ D:\Local vuln model\
 - The LLM steps require the model server running. Steps 0-4 and 2b run without LLM.
 - First CVE download is large (NVD alone is ~2GB compressed). Allow 1-2 hours for initial database build.
 - Embedding generation (all-MiniLM-L6-v2) runs on CPU. ~30 minutes for full NVD dataset on 16 threads.
+- GPU utilization looks low in Task Manager. Use `nvidia-smi` for accurate readings.
+- Windows Task Manager reports 3D engine usage differently from compute utilization.
 
 ---
 

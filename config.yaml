@@ -7,8 +7,8 @@ model:
   file: "models/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ3_M.gguf"
   download_url: "https://huggingface.co/HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive/resolve/main/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ3_M.gguf"
   quant_options:
-    iq4_xs: "models/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ4_XS.gguf"  # 19GB, partial VRAM
     iq3_m: "models/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ3_M.gguf"     # 15GB, fits VRAM
+    iq4_xs: "models/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ4_XS.gguf"  # 19GB, partial VRAM
     iq4_nl: "models/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ4_NL.gguf"   # 20GB, partial VRAM
     q4_k_m: "models/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf"   # 21GB, heavy offload
 
@@ -16,10 +16,10 @@ server:
   host: "127.0.0.1"
   port: 8080
   threads: 8
-  batch_size: 1024
+  batch_size: 2048
   ubatch_size: 512
-  context_length: 262144
-  ncmoe: AUTO             # Set by benchmark: optimal expert layer placement
+  context_length: 49152     # Fits KV cache in 16GB VRAM (~2GB). Max 65536.
+  ncmoe: AUTO               # Set by benchmark: balance experts vs KV cache
   flash_attn: true
   cache_type_k: "q4_0"
   cache_type_v: "q4_0"

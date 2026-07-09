@@ -108,7 +108,7 @@ class BenchmarkRunner:
             "tests": {}
         }
 
-        context_lengths = [8192, 32768, 65536, 131072]
+        context_lengths = [8192, 16384, 32768, 49152, 65536]
         max_usable_context = 32768
         overall_pass = True
 

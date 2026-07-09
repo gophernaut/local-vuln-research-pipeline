@@ -27,10 +27,10 @@ def main():
     parser = argparse.ArgumentParser(description="Start llama-server")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--threads", "-t", type=int, default=8)
-    parser.add_argument("--ncmoe", type=int, default=32, help="MoE experts on GPU")
-    parser.add_argument("--context", "-c", type=int, default=262144, help="Context length")
+    parser.add_argument("--ncmoe", type=int, default=24, help="MoE experts cached in VRAM (lower = more room for KV cache)")
+    parser.add_argument("--context", "-c", type=int, default=49152, help="Context length. 16GB: 32-65K. 24GB: 65-131K.")
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--batch-size", "-b", type=int, default=1024)
+    parser.add_argument("--batch-size", "-b", type=int, default=2048)
     parser.add_argument("--ubatch-size", "-ub", type=int, default=512)
     parser.add_argument("--quant", choices=list(QUANT_OPTIONS.keys()), default="iq3_m",
                        help="Quantization to use")
