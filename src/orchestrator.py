@@ -292,11 +292,11 @@ class Orchestrator:
         sa = self.state.get("static_analysis", {})
         taint = self.state.get("_taint_flows", [])
         sinks = self.state.get("_sink_matches", [])
-        cve_ctx = self.state.get("cve_context", [])
+        catalog = self.state.get("cve_context", {})
 
         sa_full = {**sa, "_taint_flows": taint, "_sink_matches": sinks}
         from src.pipeline.step5_hypotheses import run
-        return run(self.repo_path, cl, sa_full, cve_ctx)
+        return run(self.repo_path, cl, sa_full, catalog)
 
     def _step6(self):
         cl = self.state.get("classification", {})
