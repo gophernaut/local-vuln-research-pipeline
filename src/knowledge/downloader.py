@@ -47,6 +47,31 @@ class CVEDownloader:
         page = 0
         results_per_page = 2000
 
+        # Resume: skip already-downloaded pages
+        existing_pages = set()
+        for f in RAW_DIR.glob("nvd_page_*.json"):
+            try:
+                num = int(f.stem.replace("nvd_page_", ""))
+                existing_pages.add(num)
+            except ValueError:
+                pass
+        if existing_pages:
+            last_page = max(existing_pages)
+            # Verify last page is complete
+            last_file = RAW_DIR / f"nvd_page_{last_page:05d}.json"
+            if last_file.stat().st_size > 1000:
+                with open(last_file, encoding="utf-8") as f:
+                    data = json.load(f)
+                saved_count = len(data.get("vulnerabilities", []))
+                if saved_count == results_per_page or saved_count > 0:
+                    total = last_page * results_per_page
+                    page = last_page
+                    logger.info(f"  Resuming from page {page} ({total:,} CVEs already downloaded)")
+                else:
+                    # Last page was incomplete, re-download it
+                    page = last_page - 1
+                    total = max(0, page * results_per_page)
+
         while True:
             page += 1
             start_index = (page - 1) * results_per_page
@@ -57,9 +82,19 @@ class CVEDownloader:
                 req_kwargs["headers"] = {"apiKey": self.nvd_api_key}
 
             for attempt in range(3):
+                resp = None
                 try:
                     resp = self.session.get(NVD_API, **req_kwargs)
+                    resp.raise_for_status()
                     break
+                except requests.exceptions.HTTPError as http_err:
+                    status = resp.status_code if resp else 0
+                    if status in (500, 502, 503, 504) and attempt < 2:
+                        wait = (2 ** attempt) * 5
+                        logger.warning(f"  HTTP {status}, retry {attempt+1}/3 in {wait}s")
+                        time.sleep(wait)
+                    else:
+                        raise http_err
                 except (requests.exceptions.ConnectionError,
                         requests.exceptions.ChunkedEncodingError,
                         requests.exceptions.Timeout) as conn_err:
@@ -69,15 +104,14 @@ class CVEDownloader:
                         time.sleep(wait)
                     else:
                         logger.error(f"NVD request failed at page {page}: {conn_err}")
-                        logger.info(f"NVD partial: {total} CVEs across {page - 1} pages")
+                        logger.info(f"NVD partial: {total:,} CVEs across {page - 1} pages")
                         return
 
             if resp.status_code == 403:
-                logger.warning("NVD rate limited. Set NVD_API_KEY env var for higher limits.")
+                logger.warning("NVD rate limited. Set NVD_API_KEY env var.")
                 break
             if resp.status_code == 404:
                 break
-            resp.raise_for_status()
             data = resp.json()
 
             vulns = data.get("vulnerabilities", [])

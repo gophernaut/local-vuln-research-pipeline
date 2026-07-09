@@ -32,6 +32,13 @@ STEP_NAMES = {
     9: "Report Generation",
 }
 
+STEP_ORDER = {"0": 0, "1": 1, "2": 2, "2b": 3, "3": 4, "4": 5, "5": 6, "6": 7, "7": 8, "8": 9, "9": 10}
+
+
+def _step_key(num) -> int:
+    return STEP_ORDER.get(str(num), 99)
+
+
 logger = get_logger()
 
 
@@ -83,7 +90,7 @@ class Orchestrator:
         ]
 
         for step_num, func, deps, output_file in pipeline:
-            if resume_step is not None and int(step_num) if isinstance(step_num, int) else 99 < resume_step:
+            if resume_step is not None and _step_key(step_num) < resume_step:
                 continue
 
             if self._is_step_done(step_num, output_file):
