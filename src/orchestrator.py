@@ -24,15 +24,16 @@ STEP_NAMES = {
     2: "Dependency Vulns",
     "2b": "Secrets Scan",
     3: "Static Analysis",
-    4: "CVE Correlation",
-    5: "Hypothesis Generation",
+    4: "Threat Model + CVE Catalog",
+    5: "N-Pass Fuzz Audit",
+    "5b": "Triage",
     6: "Deep Code Trace",
     7: "Validation",
     8: "Anomaly Check",
     9: "Report Generation",
 }
 
-STEP_ORDER = {"0": 0, "1": 1, "2": 2, "2b": 3, "3": 4, "4": 5, "5": 6, "6": 7, "7": 8, "8": 9, "9": 10}
+STEP_ORDER = {"0": 0, "1": 1, "2": 2, "2b": 3, "3": 4, "4": 5, "5": 6, "5b": 7, "6": 8, "7": 9, "8": 10, "9": 11}
 
 
 def _step_key(num) -> int:
@@ -81,10 +82,11 @@ class Orchestrator:
             (2, self._step2, ["fingerprint"], "deps_vulns.json"),
             ("2b", self._step2b, [], "secrets.json"),
             (3, self._step3, [], "static_analysis.json"),
-            (4, self._step4, ["fingerprint", "classification", "static_analysis"], "cve_context.json"),
-            (5, self._step5, ["classification", "static_analysis", "cve_context"], "hypotheses.json"),
-            (6, self._step6, ["classification", "hypotheses", "static_analysis"], "trace_results.json"),
-            (7, self._step7, ["trace_results", "hypotheses"], "validated_findings.json"),
+            (4, self._step4, ["fingerprint", "classification", "static_analysis"], "threat_model.json"),
+            (5, self._step5, ["threat_model"], "fuzz_candidates.json"),
+            ("5b", self._step5b, ["fuzz_candidates", "threat_model"], "triaged.json"),
+            (6, self._step6, ["triaged", "classification"], "trace_results.json"),
+            (7, self._step7, ["trace_results"], "validated_findings.json"),
             (8, self._step8, ["validated_findings", "static_analysis"], "anomaly.json"),
             (9, self._step9, ["validated_findings"], "report.md"),
         ]
@@ -214,7 +216,7 @@ class Orchestrator:
             "|------|------|--------|----------|",
         ]
 
-        for sn in ["0", "1", "2", "2b", "3", "4", "5", "6", "7", "8", "9"]:
+        for sn in ["0", "1", "2", "2b", "3", "4", "5", "5b", "6", "7", "8", "9"]:
             step = steps.get(sn, {})
             name = step.get("name", STEP_NAMES.get(sn, "?"))
             status = step.get("status", "pending")
@@ -284,36 +286,61 @@ class Orchestrator:
         sinks = self.state.get("_sink_matches", [])
 
         sa_full = {**sa, "_taint_flows": taint, "_sink_matches": sinks}
-        from src.pipeline.step4_cve import run
-        return run(fp, cl, sa_full)
+        from src.pipeline.step4_threat_model import run
+        return run(self.repo_path, fp, cl, sa_full)
 
     def _step5(self):
-        cl = self.state.get("classification", {})
-        sa = self.state.get("static_analysis", {})
-        taint = self.state.get("_taint_flows", [])
-        sinks = self.state.get("_sink_matches", [])
-        catalog = self.state.get("cve_context", {})
+        tm = self.state.get("threat_model", {})
+        from src.pipeline.step5_fuzz import run
+        return run(self.repo_path, tm, self.checkpoint_dir)
 
-        sa_full = {**sa, "_taint_flows": taint, "_sink_matches": sinks}
-        from src.pipeline.step5_hypotheses import run
-        return run(self.repo_path, cl, sa_full, catalog)
+    def _step5b(self):
+        candidates = self.state.get("fuzz_candidates", [])
+        from src.pipeline.step5b_triage import run
+        return run(self.repo_path, candidates, self.checkpoint_dir)
 
     def _step6(self):
         cl = self.state.get("classification", {})
-        hyp = self.state.get("hypotheses", [])
+        triaged = self.state.get("triaged", [])
         sa = self.state.get("static_analysis", {})
         taint = self.state.get("_taint_flows", [])
         sinks = self.state.get("_sink_matches", [])
 
+        # Convert triaged findings to hypothesis format for deep trace
+        hyps = []
+        for v in triaged:
+            hyps.append({
+                "vulnerability_class": v.get("vulnerability_class", ""),
+                "component": v.get("original_component", v.get("component", "")),
+                "entry_point": v.get("entry_point", ""),
+                "entry_point_type": v.get("entry_point_type", ""),
+                "sink": v.get("sink", ""),
+                "preconditions": v.get("preconditions", []),
+                "expected_impact": v.get("expected_impact", ""),
+                "confidence": v.get("adjusted_confidence", 0),
+                "priority_score": v.get("adjusted_confidence", 0),
+                "cwe_id": v.get("cwe_id", ""),
+            })
+
         sa_full = {**sa, "_taint_flows": taint, "_sink_matches": sinks}
         from src.pipeline.step6_deep_trace import run
-        return run(self.repo_path, cl, hyp, sa_full, self.checkpoint_dir)
+        return run(self.repo_path, cl, hyps, sa_full, self.checkpoint_dir)
 
     def _step7(self):
         traces = self.state.get("trace_results", [])
-        hyp = self.state.get("hypotheses", [])
+        triaged = self.state.get("triaged", [])
+        # Build hypotheses list matching the trace results
+        hyps = []
+        for v in triaged:
+            hyps.append({
+                "vulnerability_class": v.get("vulnerability_class", ""),
+                "confidence": v.get("adjusted_confidence", 0),
+                "expected_impact": v.get("expected_impact", ""),
+                "entry_point": v.get("entry_point", ""),
+                "entry_point_type": v.get("entry_point_type", ""),
+            })
         from src.pipeline.step7_validate import run
-        return run(traces, hyp)
+        return run(traces, hyps)
 
     def _step8(self):
         valid = self.state.get("validated_findings", [])
@@ -323,6 +350,8 @@ class Orchestrator:
 
     def _step9(self):
         valid = self.state.get("validated_findings", [])
+        if not valid:
+            valid = self.state.get("triaged", [])
         output_path = self.checkpoint_dir / "report.md"
         from src.pipeline.step9_report import run
         return run(valid, self.repo_path, output_path)
