@@ -1,0 +1,26 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Project Specific Data & Model Ignored Files
+models/**/*.gguf
+models/.cache/
+data/cve/*.sqlite
+data/checkpoints/
+data/pipeline.log
+data/eval/
+data/rules/
+
+# User Configurations
+*.local.yaml

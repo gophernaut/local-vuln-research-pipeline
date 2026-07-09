@@ -1,0 +1,63 @@
+# Local Vuln Research System Configuration
+# Values with {AUTO} are set by benchmark/eval runs
+
+model:
+  name: "Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive"
+  quant: "IQ4_XS"
+  file: "models/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ4_XS.gguf"
+  download_url: "https://huggingface.co/HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive/resolve/main/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ4_XS.gguf"
+
+server:
+  host: "127.0.0.1"
+  port: 8080
+  threads: 8
+  batch_size: 1024
+  ubatch_size: 512
+  context_length: 262144
+  ncmoe: AUTO             # Set by benchmark: optimal expert layer placement
+  flash_attn: true
+  cache_type_k: "q4_0"
+  cache_type_v: "q4_0"
+  no_mmap: true
+
+pipeline:
+  min_tokens_per_second: 8
+  max_hypotheses: AUTO    # Set by benchmark: based on throughput
+  self_consistency_threshold: 0.7
+  self_consistency_runs: 3
+  max_deep_trace_files: 20
+  early_termination: true
+  parallel_analyzers: 16
+
+thresholds:
+  hypothesis_confidence_cutoff: AUTO   # Set by eval calibration
+  anomaly_ratio_sigma: 3.0              # μ - Nσ for injection detection
+  epss_min_score: 0.05                  # Minimum EPSS for dep vuln flagging
+  cvss_min_score: 7.0                   # Minimum CVSS (weak signal, used as tiebreaker)
+
+knowledge:
+  db_path: "data/cve/nvd.sqlite"
+  update_interval_days: 7
+  embedding_model: "all-MiniLM-L6-v2"
+  sources:
+    nvd: true
+    osv: true
+    ghsa: true
+    epss: true
+    kev: true
+    exploitdb: true
+
+checkpoint:
+  dir: "data/checkpoints"
+
+logging:
+  level: "INFO"
+  file: "data/pipeline.log"
+
+eval:
+  corpora:
+    owasp_benchmark: true
+    juliet: true
+    cvefixes: true
+    bigvul: true
+    diverse_vul: true
