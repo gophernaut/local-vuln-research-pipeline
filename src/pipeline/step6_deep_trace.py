@@ -27,6 +27,17 @@ SKIP_DIRS = {"node_modules", ".git", "__pycache__", ".venv", "venv",
               ".idea", ".vscode", "bin", "obj", "Debug", "Release"}
 
 
+def _safe_rglob(repo_path: Path, pattern: str) -> list[Path]:
+    try:
+        return list(fp for fp in repo_path.rglob(pattern) if not _skip(fp))
+    except (NotImplementedError, ValueError):
+        return []
+
+
+def _skip(p: Path) -> bool:
+    return any(d in p.parts for d in SKIP_DIRS)
+
+
 def run(
     repo_path: Path,
     classification: dict[str, Any],
@@ -180,20 +191,20 @@ def _resolve_requested_files(
         val = result.get(field, "")
         if isinstance(val, list):
             for v in val:
-                for fp in repo_path.rglob(str(v)):
-                    if fp.is_file() and not _skip(fp):
+                for fp in _safe_rglob(repo_path, str(v)):
+                    if fp.is_file():
                         files.add(fp)
         elif val:
-            for fp in repo_path.rglob(str(val)):
-                if fp.is_file() and not _skip(fp):
+            for fp in _safe_rglob(repo_path, str(val)):
+                if fp.is_file():
                     files.add(fp)
 
     trace = result.get("trace", [])
     for hop in trace:
         if isinstance(hop, dict):
             for v in hop.values():
-                for fp in repo_path.rglob(str(v)):
-                    if fp.is_file() and not _skip(fp):
+                for fp in _safe_rglob(repo_path, str(v)):
+                    if fp.is_file():
                         files.add(fp)
 
     # Fallback: search for file paths mentioned in trace descriptions
@@ -202,7 +213,7 @@ def _resolve_requested_files(
         import re as _re
         for match in _re.finditer(r'[\w/\-]+\.\w+', desc):
             name = match.group(0)
-            for fp in repo_path.rglob(name):
+            for fp in _safe_rglob(repo_path,name):
                 if fp.is_file() and not _skip(fp):
                     files.add(fp)
 
@@ -228,19 +239,28 @@ def _find_initial_files(
         for part in val.split():
             part = part.strip(".,;:()[]{}'\"")
             if "." in part and len(part) > 3:
-                for fp in repo_path.rglob(part):
-                    _try_add(fp)
-                for fp in repo_path.rglob(f"**/{part}"):
-                    _try_add(fp)
+                name_only = Path(part).name
+                try:
+                    for fp in _safe_rglob(repo_path, name_only):
+                        _try_add(fp)
+                    if "/" in part or "\\" in part:
+                        for fp in _safe_rglob(repo_path, f"**/{name_only}"):
+                            _try_add(fp)
+                except NotImplementedError:
+                    pass
 
     # PRIORITY 2: Files referenced in trace hops
     for hop in hyp.get("trace_hops", []):
         fname = hop.get("file", "")
         if fname:
-            for fp in repo_path.rglob(fname):
-                _try_add(fp)
-            for fp in repo_path.rglob(f"**/{Path(fname).name}"):
-                _try_add(fp)
+            name_only = Path(fname).name
+            try:
+                for fp in _safe_rglob(repo_path,name_only):
+                    _try_add(fp)
+                for fp in _safe_rglob(repo_path,f"**/{name_only}"):
+                    _try_add(fp)
+            except NotImplementedError:
+                pass
 
     # PRIORITY 3: Files containing the component name
     comp = hyp.get("component", "")
@@ -248,7 +268,7 @@ def _find_initial_files(
         part = part.strip().rstrip(".)]}>")
         name_part = Path(part).name if "/" in part or "\\" in part else part
         if len(name_part) > 3 and name_part not in loaded_names:
-            for fp in repo_path.rglob(f"*{name_part}*"):
+            for fp in _safe_rglob(repo_path,f"*{name_part}*"):
                 _try_add(fp)
 
     # PRIORITY 4: Top sink files from static analysis
@@ -262,7 +282,7 @@ def _find_initial_files(
     entry_names = ["Program.cs", "main.c", "main.cpp", "main.go", "main.rs",
                    "main.ps1", "index.js", "app.py"]
     for name in entry_names:
-        for fp in repo_path.rglob(name):
+        for fp in _safe_rglob(repo_path,name):
             _try_add(fp)
 
     return list(files)[:30]
