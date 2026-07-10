@@ -36,6 +36,20 @@ STEP_NAMES = {
 STEP_ORDER = {"0": 0, "1": 1, "2": 2, "2b": 3, "3": 4, "4": 5, "5": 6, "5b": 7, "6": 8, "7": 9, "8": 10, "9": 11}
 
 
+def _safe_write(path: Path, content: str):
+    """Write a file, retrying if locked by another process."""
+    for attempt in range(3):
+        try:
+            path.write_text(content, encoding="utf-8")
+            return
+        except PermissionError:
+            if attempt < 2:
+                time.sleep(0.5 + attempt * 0.5)
+            else:
+                logger.warning(f"Could not write {path.name} after retries (file locked)")
+
+
+
 def _step_key(num) -> int:
     return STEP_ORDER.get(str(num), 99)
 
@@ -178,10 +192,9 @@ class Orchestrator:
     def _save_checkpoint(self, step_num: int | str, filename: str, result: Any):
         output_path = self.checkpoint_dir / filename
         if filename.endswith(".json"):
-            with open(output_path, "w") as f:
-                json.dump(result, f, indent=2, default=str)
+            _safe_write(output_path, json.dumps(result, indent=2, default=str))
         elif isinstance(result, str):
-            output_path.write_text(result, encoding="utf-8")
+            _safe_write(output_path, result)
 
         self.state[str(step_num)] = result
         self.state[
@@ -232,7 +245,7 @@ class Orchestrator:
 
         lines.append("")
         progress_md = "\n".join(lines)
-        (self.checkpoint_dir / "progress.md").write_text(progress_md, encoding="utf-8")
+        _safe_write(self.checkpoint_dir / "progress.md", progress_md)
 
     def _load_progress(self):
         progress_path = self.checkpoint_dir / "progress.md"
