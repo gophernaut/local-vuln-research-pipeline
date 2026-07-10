@@ -54,6 +54,44 @@ class ExploitPath:
     notes: str = ""
 
 
+SINK_TO_SANITIZER_TAXONOMY = {
+    "command_execution": ["command_injection", "code_execution"],
+    "sql_injection": ["sql_injection"],
+    "ssrf": ["ssrf", "url_manipulation"],
+    "path_traversal": ["path_traversal", "file_inclusion"],
+    "deserialization": ["deserialization", "code_execution"],
+    "template_injection": ["template_injection", "code_execution"],
+    "xxe": ["xxe"],
+    "code_execution": ["command_injection", "code_execution"],
+    "code_injection": ["command_injection", "code_execution"],
+    "file_write": ["path_traversal", "file_inclusion"],
+    "file_read": ["path_traversal", "file_inclusion"],
+    "file_inclusion": ["file_inclusion", "code_execution"],
+    "ldap_injection": ["ldap_injection"],
+    "xpath_injection": ["xpath_injection"],
+    "nosql_injection": ["nosql_injection"],
+    "spel_injection": ["spel_injection"],
+    "reflection_invoke": ["command_injection", "code_execution"],
+    "buffer_overflow": ["buffer_overflow"],
+    "format_string": ["format_string"],
+    "auth_bypass": ["auth_bypass", "privilege_escalation"],
+    "hardcoded_secret": ["auth_bypass"],
+    "weak_crypto": ["weak_crypto"],
+    "weak_random": ["weak_random"],
+    "race_condition": ["race_condition"],
+    "toctou": ["toctou"],
+    "security_misconfig": ["security_misconfig"],
+    "object_injection": ["deserialization", "object_injection"],
+    "xss": ["xss", "html_injection"],
+    "html_injection": ["xss", "html_injection"],
+    "csrf": ["csrf"],
+    "type_confusion": ["type_confusion"],
+    "integer_overflow": ["buffer_overflow"],
+    "transmute": ["buffer_overflow", "memory_corruption"],
+    "yaml_deserialize": ["deserialization"],
+}
+
+
 SOURCE_SINK_COMPATIBILITY = {
     "HTTP_REQUEST": ["command_execution", "sql_injection", "ssrf", "path_traversal",
                      "deserialization", "template_injection", "xxe", "code_execution",
@@ -287,16 +325,16 @@ class PathEnumerator:
     ) -> ExploitPath | None:
         steps = []
         sanitizers_on_path = []
-        tainted_vars = {source.variable, source.source_type}
+        tainted_vars: set[str] = set()
         if source.variable and "." not in source.variable and "(" not in source.variable:
             tainted_vars.add(source.variable)
-        if source.source_type and source.source_type not in tainted_vars:
+        if source.source_type:
             tainted_vars.add(source.source_type)
 
         sink_in_last_func = False
         module_level_sink = not call_path
 
-        for func_key in call_path:
+        for i, func_key in enumerate(call_path):
             func = call_graph.nodes.get(func_key)
             if not func:
                 continue
@@ -308,34 +346,31 @@ class PathEnumerator:
             sanitizers_on_path.extend(sanitizers_in_func)
 
             is_sink_func = func.line <= sink.line <= func.end_line
-            if is_sink_func:
-                tainted_vars_with_sink = tainted_vars | {"user", "data", "input", "arg", "param", "value"}
-                try:
-                    tstate = self.intra.trace_function(
-                        function_body=func.body,
-                        function_name=func.name,
-                        file=func.file,
-                        language=self._language_for_file(func.file),
-                        source_tag_vars=tainted_vars_with_sink,
-                        param_names=set(func.params) if hasattr(func, 'params') and func.params else set(),
-                    )
-                    sink_in_last_func = True
-                except Exception:
-                    sink_in_last_func = True
-            else:
-                try:
-                    tstate = self.intra.trace_function(
-                        function_body=func.body,
-                        function_name=func.name,
-                        file=func.file,
-                        language=self._language_for_file(func.file),
-                        source_tag_vars=tainted_vars,
-                        param_names=set(),
-                    )
-                except Exception:
-                    continue
 
-            tainted_vars = tstate.tainted_vars
+            param_names = set(func.params) if hasattr(func, 'params') and func.params else set()
+            seed_vars = tainted_vars.copy()
+            if is_sink_func:
+                seed_vars.update({"user", "data", "input", "arg", "param", "value"})
+            seed_vars.update(param_names)
+
+            try:
+                tstate = self.intra.trace_function(
+                    function_body=func.body,
+                    function_name=func.name,
+                    file=func.file,
+                    language=self._language_for_file(func.file),
+                    source_tag_vars=seed_vars,
+                    param_names=param_names,
+                )
+            except Exception:
+                if is_sink_func:
+                    sink_in_last_func = True
+                continue
+
+            tainted_vars |= tstate.tainted_vars
+
+            if is_sink_func:
+                sink_in_last_func = True
 
             sink_reach = None
             if is_sink_func:
@@ -359,13 +394,13 @@ class PathEnumerator:
             return None
 
         sink_func_has_reach = any(s.sink_reach for s in steps)
-        has_path_sanitizer = any(s.sanitizer_seen for s in steps)
+        is_blocked = self._is_blocked_by_sanitizer(sanitizers_on_path, sink)
 
         is_exploitable = True
-        if sink.category in ("race_condition", "security_misconfig", "toctou"):
-            is_exploitable = True
-        elif has_path_sanitizer and sink.category in [p.category for p in sanitizers_on_path]:
+        if is_blocked:
             is_exploitable = False
+        elif sink.category in ("race_condition", "security_misconfig", "toctou"):
+            is_exploitable = True
         elif not sink_in_last_func and not module_level_sink:
             is_exploitable = False
 
@@ -376,7 +411,7 @@ class PathEnumerator:
             sanitizers_on_path=sanitizers_on_path,
             cwe_id=sink.cwe_id,
             is_exploitable=is_exploitable,
-            is_blocked_by_sanitizer=has_path_sanitizer and sink.category in [p.category for p in sanitizers_on_path],
+            is_blocked_by_sanitizer=is_blocked,
         )
 
     def _is_path_exploitable(self, steps: list[PathStep], sanitizers: list[SanitizerTag],
@@ -386,13 +421,15 @@ class PathEnumerator:
                 return True
         return False
 
-    def _is_blocked_by_sanitizer(self, steps: list[PathStep], sanitizers: list[SanitizerTag],
+    def _is_blocked_by_sanitizer(self, sanitizers: list[SanitizerTag],
                                   sink: SinkTag) -> bool:
         if not sanitizers:
             return False
+        normalized_categories = SINK_TO_SANITIZER_TAXONOMY.get(sink.category, [sink.category])
         for sanitizer in sanitizers:
-            if sink.category in sanitizer.protected_against:
-                return True
+            for protected in sanitizer.protected_against:
+                if protected in normalized_categories:
+                    return True
         return False
 
     def _language_for_file(self, filepath: str) -> str:

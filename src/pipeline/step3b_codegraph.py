@@ -5,9 +5,7 @@ This is the foundation for the path enumeration that follows.
 """
 from __future__ import annotations
 
-import json
 import time
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +69,7 @@ def run(repo_path: Path) -> dict[str, Any]:
                     "is_static": func.is_static,
                     "is_constructor": func.is_constructor,
                     "class_name": func.class_name,
+                    "body": func.body,
                 }
                 for func in call_graph.nodes.values()
             ],

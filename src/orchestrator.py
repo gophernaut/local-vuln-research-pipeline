@@ -124,7 +124,7 @@ class Orchestrator:
             ("3b", self._step3b, [], "code_graph.json"),
             (4, self._step4, ["fingerprint", "classification", "static_analysis"], "threat_model.json"),
             ("4b", self._step4b, ["code_graph"], "path_enum.json"),
-            ("4c", self._step4c, ["path_enum"], "path_analysis.json"),
+            ("4c", self._step4c, ["path_enum", "threat_model"], "path_analysis.json"),
             (5, self._step5_memory, ["code_graph"], "memory_findings.json"),
             (6, self._step6_chains, ["path_analysis"], "chains.json"),
             (7, self._step7_validate, ["path_analysis", "memory_findings"], "validated_findings.json"),
@@ -327,7 +327,9 @@ class Orchestrator:
 
     def _step4c(self):
         from src.pipeline.step4c_path_analyze import run
-        return run(self.repo_path, self.state.get("path_enum", {}))
+        threat_model = self.state.get("threat_model", {})
+        cve_catalog = threat_model.get("cve_catalog", {})
+        return run(self.repo_path, self.state.get("path_enum", {}), cve_catalog=cve_catalog)
 
     def _step5_memory(self):
         code_graph = self.state.get("code_graph", {})
@@ -335,7 +337,7 @@ class Orchestrator:
         return {"findings": memory_findings, "summary": {"total": len(memory_findings)}}
 
     def _step6_chains(self):
-        from src.pipeline.step7_chains import run
+        from src.pipeline.step6_chains import run
         return run(self.state.get("path_analysis", {}))
 
     def _step7_validate(self):

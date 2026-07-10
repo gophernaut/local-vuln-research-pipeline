@@ -8,8 +8,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from src.llm.client import LLMClient
-from src.llm.prompts import anomaly_check_system
 from src.llm.guard import InjectionGuard
 from src.utils.logger import get_logger
 

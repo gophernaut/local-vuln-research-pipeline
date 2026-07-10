@@ -141,9 +141,11 @@ class CVEDatabase:
             "high": self.conn.execute(
                 "SELECT COUNT(*) FROM vulnerabilities WHERE severity = 'HIGH'"
             ).fetchone()[0],
-            "last_import": self.conn.execute(
-                "SELECT value FROM meta WHERE key = 'last_import'"
-            ).fetchone(),
+            "last_import": (
+                self.conn.execute(
+                    "SELECT value FROM meta WHERE key = 'last_import'"
+                ).fetchone() or (None,)
+            )[0],
         }
 
     def _fts_search(self, query: str, limit: int = 100) -> list[Any]:

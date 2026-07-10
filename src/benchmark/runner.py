@@ -139,8 +139,8 @@ class BenchmarkRunner:
         return ok
 
     def _test_ncmoe(self, ncmoe: int, cl: int, results: dict):
-        tps_dt = self._measure_throughput("deep_trace", cl)
-        tps_hg = self._measure_throughput("hypothesis_gen", cl)
+        tps_dt = self._measure_throughput("deep_trace", cl, ncmoe=ncmoe)
+        tps_hg = self._measure_throughput("hypothesis_gen", cl, ncmoe=ncmoe)
         results["tests"][f"ncmoe_{ncmoe}"] = {
             "context_length": cl,
             "throughput_deep_trace": tps_dt,
@@ -148,10 +148,17 @@ class BenchmarkRunner:
         }
         print(f"  Deep trace: {tps_dt:.1f} tok/s | Hypothesis: {tps_hg:.1f} tok/s")
 
-    def _measure_throughput(self, prompt_key: str, context_length: int) -> float:
+    def _measure_throughput(self, prompt_key: str, context_length: int, ncmoe: int = 0) -> float:
         prompt_data = BENCHMARK_PROMPTS.get(prompt_key)
         if not prompt_data or not self.client:
             return 0.0
+
+        filler = "x" * min(context_length - 500, 100000) if context_length > 1000 else ""
+        filled_user = f"{prompt_data['user']}\n\n[FILLER:{filler[:50000]}]" if filler else prompt_data["user"]
+
+        extra_body: dict[str, Any] = {"top_k": 20, "presence_penalty": 0.0}
+        if ncmoe > 0:
+            extra_body["ncmoe"] = ncmoe
 
         try:
             start = time.perf_counter()
@@ -159,12 +166,12 @@ class BenchmarkRunner:
                 model="local-model",
                 messages=[
                     {"role": "system", "content": prompt_data["system"]},
-                    {"role": "user", "content": prompt_data["user"]},
+                    {"role": "user", "content": filled_user},
                 ],
                 max_tokens=1024,
                 temperature=0.6,
                 top_p=0.95,
-                extra_body={"top_k": 20, "presence_penalty": 0.0},
+                extra_body=extra_body,
             )
             elapsed = time.perf_counter() - start
 
@@ -183,7 +190,6 @@ class BenchmarkRunner:
             return 0.0
 
         successes = 0
-        resp = None
         for i in range(runs):
             try:
                 resp = self.client.chat.completions.create(
@@ -202,16 +208,7 @@ class BenchmarkRunner:
                 json.loads(cleaned)
                 successes += 1
             except Exception:
-                if resp and resp.choices:
-                    raw = resp.choices[0].message.content or ""
-                    cleaned = self._clean_thinking(raw)
-                    try:
-                        json.loads(cleaned)
-                        successes += 1
-                    except Exception:
-                        resp = None
-                else:
-                    resp = None
+                pass
         return successes / runs if runs > 0 else 0.0
 
     def _clean_thinking(self, text: str) -> str:

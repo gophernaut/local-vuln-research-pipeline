@@ -30,6 +30,46 @@ from src.utils.logger import get_logger
 logger = get_logger()
 
 
+def _build_cve_context(cve_catalog: dict | None, cwe_id: str, sink_category: str) -> str:
+    """Build a CVE context snippet matching this path's sink category / CWE."""
+    if not cve_catalog:
+        return ""
+
+    cve_candidates = []
+    classes = cve_catalog.get("classes", {})
+
+    if cwe_id:
+        cwe_id_stripped = cwe_id.replace("CWE-", "")
+        for exploit_class, cves in classes.items():
+            for cve in cves:
+                cwe_field = cve.get("cwe_ids", "")
+                if not isinstance(cwe_field, str):
+                    continue
+                if cwe_id in cwe_field or cwe_id_stripped in cwe_field:
+                    cve_candidates.append(cve)
+
+    if not cve_candidates:
+        for key in (sink_category, sink_category.lower(), sink_category.replace("_", " ")):
+            if key in classes:
+                cve_candidates = classes[key]
+                break
+
+    if not cve_candidates:
+        return ""
+
+    lines = []
+    lines.append("== SIMILAR KNOWN VULNERABILITIES (same CWE/product) ==")
+    for cve in cve_candidates[:3]:
+        cve_id = cve.get("cve_id", "")
+        desc = (cve.get("description") or "")[:200]
+        sev = cve.get("severity", "?")
+        kev = " [CISA KEV]" if cve.get("kev_member") else ""
+        lines.append(f"- {cve_id} ({sev}){kev}: {desc}")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
 @dataclass
 class PathAnalysisResult:
     path_id: str
@@ -50,9 +90,12 @@ class PathAnalysisResult:
     poc_idea: str = ""
 
 
-def _build_path_prompt(path: ExploitPath, function_sources: dict[str, str]) -> str:
+def _build_path_prompt(path: ExploitPath, function_sources: dict[str, str],
+                       cve_catalog: dict | None = None) -> str:
     source = path.source
     sink = path.sink
+
+    cve_context = _build_cve_context(cve_catalog, sink.cwe_id, sink.category)
 
     code_blocks = []
     for step in path.steps:
@@ -82,6 +125,7 @@ CWE: {sink.cwe_id}
 Description: {sink.description}
 Code: {sink.matched_text}
 
+{cve_context}
 == DATA FLOW PATH ==
 The data flows through these functions (in order):
 """
@@ -130,7 +174,12 @@ def _load_function_sources(paths: list[ExploitPath], repo_path: Path) -> dict[st
             func_key = step.function_key
             if func_key in function_sources:
                 continue
-            file_path = repo_path / step.file
+            try:
+                file_path = Path(step.file)
+                if not file_path.is_absolute():
+                    file_path = repo_path / step.file
+            except Exception:
+                file_path = repo_path / step.file
             if not file_path.exists():
                 continue
             try:
@@ -149,6 +198,7 @@ def analyze_paths_with_llm(
     repo_path: Path,
     max_paths: int = 500,
     temperature: float = 0.3,
+    cve_catalog: dict | None = None,
 ) -> list[PathAnalysisResult]:
     logger.info(f"Analyzing {len(paths)} paths with LLM (max {max_paths})")
 
@@ -190,7 +240,7 @@ Be specific. Cite exact lines. Don't pad with caveats. Make a decision.
         if not path.is_exploitable:
             continue
 
-        prompt = _build_path_prompt(path, function_sources)
+        prompt = _build_path_prompt(path, function_sources, cve_catalog)
 
         try:
             result = client.chat_json(

@@ -27,15 +27,13 @@ FORMAT_FUNCTIONS = {
     ],
     "cpp": [
         (r"\bprintf\s*\(\s*(\w+)", "printf"),
-        (r"\bstd::cout\s*<<\s*(\w+)", "cout"),
-        (r"\bqDebug\s*<<\s*(\w+)", "qDebug"),
         (r"\bfprintf\s*\(\s*\w+\s*,\s*(\w+)", "fprintf"),
+        (r"\bsprintf\s*\(\s*\w+\s*,\s*(\w+)", "sprintf"),
     ],
     "rust": [
-        (r"\bprintln!\s*\(\s*(\w+)", "println"),
-        (r"\beprintln!\s*\(\s*(\w+)", "eprintln"),
-        (r"\bprint!\s*\(\s*(\w+)", "print"),
-        (r"\bformat!\s*\(\s*(\w+)", "format"),
+        (r"\bunsafe\s*\{[^}]*libc::printf\s*\(\s*(\w+)", "unsafe_printf"),
+        (r"\bunsafe\s*\{[^}]*CString::new\s*\([^)]*\)", "unsafe_cstring"),
+        (r"\bstd::fmt::write\s*\(", "format_write"),
     ],
 }
 

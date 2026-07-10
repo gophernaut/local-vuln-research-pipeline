@@ -5,19 +5,14 @@ asks the LLM to determine if the path is genuinely exploitable.
 """
 from __future__ import annotations
 
-import json
 import time
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from src.analysis.call_graph import CallGraphBuilder
 from src.analysis.path_analyze import analyze_paths_with_llm
-from src.analysis.path_enum import ExploitPath, PathEnumerator, PathStep
+from src.analysis.path_enum import ExploitPath, PathStep
 from src.analysis.source_tag import SourceTag
 from src.analysis.sink_tag import SinkTag
-from src.analysis.sanitizer_tag import SanitizerTag
-from src.analysis.ast_parser import ASTParser
 from src.utils.logger import get_logger
 from src.config import config
 
@@ -27,7 +22,7 @@ logger = get_logger()
 def _reconstruct_paths(path_data: dict) -> list[ExploitPath]:
     paths = []
     for p in path_data.get("paths", []):
-        if not p.get("is_exploitable") or p.get("is_blocked_by_sanitizer"):
+        if not p.get("is_exploitable"):
             continue
         source = SourceTag(
             file=p["source"]["file"], line=p["source"]["line"],
@@ -65,7 +60,7 @@ def _reconstruct_paths(path_data: dict) -> list[ExploitPath]:
     return paths
 
 
-def run(repo_path: Path, path_data: dict) -> dict[str, Any]:
+def run(repo_path: Path, path_data: dict, cve_catalog: dict | None = None) -> dict[str, Any]:
     logger.info("Step 4c: Per-path LLM analysis...")
 
     t0 = time.time()
@@ -75,6 +70,8 @@ def run(repo_path: Path, path_data: dict) -> dict[str, Any]:
 
     exploitable_paths = _reconstruct_paths(path_data)
     logger.info(f"  Reconstructed {len(exploitable_paths)} potentially exploitable paths")
+    if cve_catalog:
+        logger.info(f"  CVE catalog available: {cve_catalog.get('count', 0)} CVEs for context injection")
 
     if not exploitable_paths:
         logger.info("  No paths to analyze")
@@ -93,6 +90,7 @@ def run(repo_path: Path, path_data: dict) -> dict[str, Any]:
         exploitable_paths, repo_path,
         max_paths=max_paths,
         temperature=temperature,
+        cve_catalog=cve_catalog,
     )
 
     verified = sum(1 for r in results if r.verdict == "VERIFIED_EXPLOITABLE")

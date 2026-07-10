@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS vulnerabilities (
     description TEXT,
     cvss_score REAL,
     cvss_vector TEXT,
+    cvss_version TEXT,
     severity TEXT,
     cwe_ids TEXT,
     cpe_matches TEXT,
@@ -183,6 +184,7 @@ class CVEImporter:
                     description=desc_text,
                     cvss_score=metrics.get("score"),
                     cvss_vector=metrics.get("vector"),
+                    cvss_version=metrics.get("version"),
                     severity=metrics.get("severity"),
                     cwe_ids=json.dumps(cwes) if cwes else None,
                     cpe_matches=cpe_text,
@@ -194,7 +196,7 @@ class CVEImporter:
                 )
                 imported += 1
 
-            if imported % 5000 == 0:
+            if imported > 0 and imported % 5000 == 0:
                 self.conn.commit()
                 logger.info(f"  ... {imported} CVEs imported so far (total scanned: {total})")
 
@@ -207,10 +209,13 @@ class CVEImporter:
             entries = metrics.get(version, [])
             if entries:
                 cvss = entries[0].get("cvssData", {})
+                cvss_version = {"cvssMetricV40": "4.0", "cvssMetricV31": "3.1",
+                                 "cvssMetricV30": "3.0", "cvssMetricV2": "2.0"}.get(version, "")
                 return {
                     "score": cvss.get("baseScore"),
                     "vector": cvss.get("vectorString"),
                     "severity": cvss.get("baseSeverity", "").upper(),
+                    "version": cvss_version,
                 }
         return {}
 
@@ -246,19 +251,20 @@ class CVEImporter:
         assert self.conn
         self.conn.execute(
             """INSERT OR REPLACE INTO vulnerabilities
-            (id, source, description, cvss_score, cvss_vector, severity,
+            (id, source, description, cvss_score, cvss_vector, cvss_version, severity,
              cwe_ids, cpe_matches, package_name, package_ecosystem,
              affected_versions, fixed_versions,
              epss_score, epss_percentile, kev_member, kev_date_added,
              has_public_exploit, exploit_sources,
              published_date, modified_date)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 cve_id,
                 kwargs.get("source"),
                 kwargs.get("description"),
                 kwargs.get("cvss_score"),
                 kwargs.get("cvss_vector"),
+                kwargs.get("cvss_version"),
                 kwargs.get("severity"),
                 kwargs.get("cwe_ids"),
                 kwargs.get("cpe_matches"),

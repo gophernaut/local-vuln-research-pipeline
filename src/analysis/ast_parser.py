@@ -393,7 +393,11 @@ class ASTParser:
                 line=func_node.start_point[0] + 1,
                 end_line=fdata.get("end_line", func_node.end_point[0] + 1),
                 body=fdata.get("body", ""),
-                is_constructor=(fdata["name"] == "__init__"),
+                is_constructor=(
+                    fdata["name"] == "__init__"
+                    or func_node.type == "constructor_declaration"
+                    or (class_name and fdata["name"] == class_name)
+                ),
                 is_static=is_static,
                 class_name=class_name,
                 params=self._extract_param_names(fdata.get("params_text", ""), lang),
@@ -456,35 +460,44 @@ class ASTParser:
             "python": """(call
                     function: [(identifier) @func_name
                               (attribute
-                                attribute: (identifier) @attr)]) @call""",
+                                attribute: (identifier) @attr)]
+                    arguments: (argument_list) @args) @call""",
             "javascript": """(call_expression
                     function: [(identifier) @func_name
                               (member_expression
-                                property: (property_identifier) @attr)]) @call""",
+                                property: (property_identifier) @attr)]
+                    arguments: (arguments) @args) @call""",
             "typescript": """(call_expression
                     function: [(identifier) @func_name
                               (member_expression
-                                property: (property_identifier) @attr)]) @call""",
+                                property: (property_identifier) @attr)]
+                    arguments: (arguments) @args) @call""",
             "java": """(method_invocation
-                    name: (identifier) @func_name) @call""",
+                    name: (identifier) @func_name
+                    arguments: (argument_list) @args) @call""",
             "c": """(call_expression
-                    function: (identifier) @func_name) @call""",
+                    function: (identifier) @func_name
+                    arguments: (argument_list) @args) @call""",
             "cpp": """(call_expression
                     function: [(identifier) @func_name
                               (field_expression
-                                field: (field_identifier) @attr)]) @call""",
+                                field: (field_identifier) @attr)]
+                    arguments: (argument_list) @args) @call""",
             "go": """(call_expression
                     function: [(identifier) @func_name
                               (selector_expression
-                                field: (field_identifier) @attr)]) @call""",
+                                field: (field_identifier) @attr)]
+                    arguments: (argument_list) @args) @call""",
             "rust": """(call_expression
                     function: [(identifier) @func_name
                               (field_expression
-                                field: (field_identifier) @attr)]) @call""",
+                                field: (field_identifier) @attr)]
+                    arguments: (arguments) @args) @call""",
             "csharp": """(invocation_expression
                     function: [(identifier) @func_name
                               (member_access_expression
-                                name: (identifier) @attr)]) @call""",
+                                name: (identifier) @attr)]
+                    arguments: (argument_list) @args) @call""",
         }
 
         query_str = queries.get(lang)
@@ -499,43 +512,64 @@ class ASTParser:
         if not captures:
             return
 
-        seen_calls = set()
+        call_nodes: dict[int, dict] = {}
         for cap_name, cap_nodes in captures.items():
-            if cap_name in ("func_name", "attr"):
-                for cap_node in cap_nodes:
-                    line = cap_node.start_point[0] + 1
-                    call_key = (line, cap_name)
-                    if call_key in seen_calls:
-                        continue
-                    seen_calls.add(call_key)
+            for cap_node in cap_nodes:
+                call_key = cap_node.start_byte
+                if cap_name == "call":
+                    call_nodes.setdefault(call_key, {})["call_node"] = cap_node
+                elif cap_name == "func_name":
+                    call_nodes.setdefault(call_key, {})["func_name"] = source[cap_node.start_byte:cap_node.end_byte]
+                    call_nodes.setdefault(call_key, {})["func_node"] = cap_node
+                elif cap_name == "attr":
+                    call_nodes.setdefault(call_key, {})["func_name"] = source[cap_node.start_byte:cap_node.end_byte]
+                    call_nodes.setdefault(call_key, {})["attr_node"] = cap_node
+                elif cap_name == "args":
+                    call_nodes.setdefault(call_key, {})["args_node"] = cap_node
 
-                    func_name = source[cap_node.start_byte:cap_node.end_byte]
-                    if len(func_name) > 100:
-                        continue
-                    obj_name = ""
-                    if cap_node.parent and cap_node.parent.type in (
-                        "member_expression", "field_expression",
-                        "selector_expression", "attribute", "method_invocation",
-                        "call",
-                    ):
-                        obj_field = cap_node.parent.child_by_field_name("object")
-                        if obj_field is None and cap_node.parent.type == "method_invocation":
-                            obj_field = cap_node.parent.child_by_field_name("object")
-                        if obj_field is None and cap_node.parent.type == "call":
-                            if cap_node.parent.parent and cap_node.parent.parent.type == "call":
-                                for sib in cap_node.parent.parent.children:
-                                    if sib.type == "attribute" and sib != cap_node.parent:
-                                        obj_field = sib.child_by_field_name("object")
-                                        break
-                        if obj_field:
-                            obj_name = source[obj_field.start_byte:obj_field.end_byte]
+        seen_calls = set()
+        for call_key, call_data in call_nodes.items():
+            func_name = call_data.get("func_name", "")
+            if not func_name or len(func_name) > 100:
+                continue
 
-                    analysis.call_sites.append(CallSite(
-                        file=analysis.path,
-                        line=line,
-                        function_name=func_name,
-                        object_name=obj_name,
-                    ))
+            func_node = call_data.get("func_node") or call_data.get("attr_node")
+            line = (func_node.start_point[0] + 1) if func_node else 0
+            if (line, func_name) in seen_calls:
+                continue
+            seen_calls.add((line, func_name))
+
+            obj_name = ""
+            if func_node and func_node.parent and func_node.parent.type in (
+                "member_expression", "field_expression",
+                "selector_expression", "attribute", "method_invocation",
+                "call",
+            ):
+                obj_field = func_node.parent.child_by_field_name("object")
+                if obj_field is None and func_node.parent.type == "method_invocation":
+                    obj_field = func_node.parent.child_by_field_name("object")
+                if obj_field is None and func_node.parent.type == "call":
+                    if func_node.parent.parent and func_node.parent.parent.type == "call":
+                        for sib in func_node.parent.parent.children:
+                            if sib.type == "attribute" and sib != func_node.parent:
+                                obj_field = sib.child_by_field_name("object")
+                                break
+                if obj_field:
+                    obj_name = source[obj_field.start_byte:obj_field.end_byte]
+
+            arguments = []
+            args_node = call_data.get("args_node")
+            if args_node:
+                args_text = source[args_node.start_byte:args_node.end_byte]
+                arguments = self._extract_argument_names(args_text, lang)
+
+            analysis.call_sites.append(CallSite(
+                file=analysis.path,
+                line=line,
+                function_name=func_name,
+                object_name=obj_name,
+                arguments=arguments,
+            ))
 
     def _extract_entry_points(self, node, source: str, analysis: FileAnalysis):
         lang = analysis.language
@@ -1067,6 +1101,66 @@ class ASTParser:
                         file=analysis.path,
                         line=cap_node.start_point[0] + 1,
                     ))
+
+    def _extract_argument_names(self, args_text: str, lang: str) -> list[str]:
+        """Extract variable/identifier names from a call-site argument list."""
+
+        args_text = args_text.strip()
+        if not args_text:
+            return []
+
+        stripped = args_text[1:-1].strip() if args_text.startswith("(") and args_text.endswith(")") else args_text
+        if not stripped:
+            return []
+
+        parts = []
+        depth = 0
+        current = ""
+        string_char = ""
+        for ch in stripped:
+            if string_char:
+                current += ch
+                if ch == string_char and current[-2:-1] != "\\":
+                    string_char = ""
+                    current = ""
+                continue
+            if ch in "\"'":
+                string_char = ch
+                current += ch
+                continue
+            if ch in "([{":
+                depth += 1
+                current += ch
+            elif ch in ")]}":
+                depth -= 1
+                current += ch
+            elif ch == "," and depth == 0:
+                parts.append(current.strip())
+                current = ""
+            else:
+                current += ch
+        if current.strip():
+            parts.append(current.strip())
+
+        names = []
+        for p in parts:
+            p = p.strip()
+            if not p:
+                continue
+            if lang in ("python",):
+                var_match = re.match(r"^(\w+)", p)
+                if var_match:
+                    names.append(var_match.group(1))
+            elif lang in ("javascript", "typescript", "java", "c", "cpp", "csharp"):
+                tokens = re.findall(r"\b[a-zA-Z_]\w*\b", p)
+                if tokens and not p.startswith(("'", '"', "new ")):
+                    names.extend([t for t in tokens if t not in ("new", "return", "this", "super", "true", "false", "null")])
+            else:
+                var_match = re.match(r"^(\w+)", p)
+                if var_match:
+                    names.append(var_match.group(1))
+
+        return names
 
     def _regex_find(self, text: str, pattern: str) -> list[tuple[int, int]]:
         return [(m.start(), m.end()) for m in re.finditer(pattern, text)]

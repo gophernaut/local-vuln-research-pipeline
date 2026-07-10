@@ -91,28 +91,35 @@ class EmbeddingIndex:
             "cvss_score, epss_score, kev_member "
             "FROM vulnerabilities WHERE description_embedding IS NOT NULL"
         ).fetchall()
+        conn.close()
+
+        if not rows:
+            return []
+
+        stored_embeddings = np.vstack([
+            np.frombuffer(r[3], dtype=np.float32)
+            for r in rows if r[3] is not None
+        ])
+
+        similarities = stored_embeddings.dot(query_embedding)
 
         results = []
-        for row in rows:
-            rowid, cve_id, desc, emb_blob, cvss, epss, kev = row
+        for i, row in enumerate(rows):
+            emb_blob = row[3]
             if emb_blob is None:
                 continue
-            try:
-                stored_emb = np.frombuffer(emb_blob, dtype=np.float32)
-                similarity = float(np.dot(query_embedding, stored_emb))
-                if similarity >= min_similarity:
-                    results.append({
-                        "id": cve_id,
-                        "description": desc,
-                        "similarity": similarity,
-                        "cvss_score": cvss,
-                        "epss_score": epss,
-                        "kev_member": kev,
-                    })
-            except Exception:
-                continue
-
-        conn.close()
+            if i >= len(similarities):
+                break
+            sim = float(similarities[i])
+            if sim >= min_similarity:
+                results.append({
+                    "id": row[1],
+                    "description": row[2],
+                    "similarity": sim,
+                    "cvss_score": row[4],
+                    "epss_score": row[5],
+                    "kev_member": row[6],
+                })
 
         results.sort(key=lambda r: (r["kev_member"] or 0) * 10 + r["similarity"], reverse=True)
         return results[:limit]

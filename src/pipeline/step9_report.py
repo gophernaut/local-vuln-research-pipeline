@@ -140,7 +140,7 @@ def _format_memory_finding(finding: dict, index: int) -> str:
         sections.append("- Implement proper reference counting or garbage collection")
         sections.append("- Use static analysis tools to detect lifetime issues")
     elif 'integer overflow' in vuln_class:
-        sections.append("- Use safe arithmetic functions (\_\_builtin\_mul\_overflow, checked\_mul)")
+        sections.append("- Use safe arithmetic functions (`__builtin_mul_overflow`, `checked_mul`)")
         sections.append("- Validate allocation sizes before multiplication")
         sections.append("- Use size_t consistently and check for SIZE_MAX/0 boundaries")
     elif 'format string' in vuln_class:
@@ -231,7 +231,8 @@ def _format_coverage(code_graph: dict, path_data: dict, path_analysis: dict,
     sections.append(f"- **Untrusted sources tagged**: {cg.get('sources', 0)}")
     sections.append(f"- **Dangerous sinks tagged**: {cg.get('sinks', 0)}")
     sections.append(f"- **Sanitizers identified**: {cg.get('sanitizers', 0)}")
-    sections.append(f"- **Memory corruption findings**: {cg.get('memory_findings', 0)}")
+    memory_count = cg.get('memory_findings', [])
+    sections.append(f"- **Memory corruption findings**: {len(memory_count) if isinstance(memory_count, list) else memory_count}")
     sections.append("")
 
     sections.append("### Path Enumeration")

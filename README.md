@@ -32,14 +32,14 @@ Step 0  - Fingerprint + SBOM              (deterministic, full file inventory)
 Step 1  - Classify target                 (16+ target types, dual-language detection)
 Step 2  - Dependency vuln scan            (NVD + EPSS/KEV ranked)
 Step 2b - Secrets scan                    (gitleaks rules)
-Step 3  - Static analysis                 (Semgrep + 200+ sink patterns + taint flow, 16 languages)
-Step 3b - Code graph construction         (call graph + source/sink/sanitizer tags)
+Step 3  - Static analysis                 (Semgrep scan + file inventory)
+Step 3b - Code graph construction         (call graph + source/sink/sanitizer tags + memory analysis)
 Step 4  - Threat model + CVE catalog      (1 LLM pass, product-specific CVE search)
-Step 4b - Path enumeration               (exhaustive source-to-sink path discovery)
+Step 4b - Path enumeration               (exhaustive source-to-sink path discovery + inter-procedural taint)
 Step 4c - Per-path LLM analysis           (exploitability validation, one path at a time)
-Step 5  - Memory corruption analysis      (5 dedicated analyzers for C/C++/Rust)
-Step 6  - Chain synthesis                 (attack graph + multi-step exploit chains)
-Step 7  - Validation                      (LLM-based precondition test)
+Step 5  - Memory findings extraction      (results from step 3b's memory analysis)
+Step 6  - Chain synthesis                 (networkx attack graph + transitive closure)
+Step 7  - Validation                      (confidence-based filtering)
 Step 8  - Anomaly check                   (prompt injection detection)
 Step 9  - Report + PoC                    (root cause, exploit path, remediation)
     |
@@ -166,19 +166,22 @@ python run_audit.py /path/to/target-repo --resume   # resume from checkpoint
 ### Step 3b: Code Graph Construction
 
 Builds the complete foundation for exhaustive analysis:
+- AST parsing: 9 languages via tree-sitter, 7 via regex fallback
 - Call graph: every function to every callee, direct + virtual dispatch, cross-file via import resolution
-- Control flow per function: basic blocks, branches, exception handlers
+- Call sites: arguments extracted from every call expression for inter-procedural taint
 - Source tags: every untrusted entry point annotated with source type
 - Sink tags: every dangerous operation tagged with vulnerability class
-- Sanitizer tags: every validator, encoder, auth check identified
+- Sanitizer tags: every validator, encoder, auth check identified with `protected_against` categories
+- Memory analysis: 5 parallel analyzers run inline for C/C++/Rust
 
 ### Step 4b: Path Enumeration
 
 For every source-to-sink pair that is compatible:
 1. Use the call graph to find all call paths from source to sink
-2. Trace taint through each function on the path
-3. Identify which paths have effective sanitizers
-4. Record the complete path inventory
+2. Trace taint through each function on the path (intra-procedural + inter-procedural accumulation)
+3. Cross-reference sanitizers against sink categories using a normalized taxonomy — sanitizer `protected_against` values are mapped to sink categories via `SINK_TO_SANITIZER_TAXONOMY`
+4. Blocked paths still proceed to LLM analysis (sanitizer effectiveness verified, not blind-trusted)
+5. Record the complete path inventory
 
 A medium codebase (~800 files) might produce 5,000-50,000 source-to-sink paths. Large codebases (Linux kernel, VSCode) use chunked processing and path prioritization to scale to millions of paths.
 
@@ -208,19 +211,17 @@ For C/C++/Rust codebases, five dedicated analyzers:
 
 ### Step 6: Chain Synthesis
 
-Builds an attack graph from all confirmed exploitable findings:
-- A writes to a file, then B reads that file
-- A leaks data, then B uses that data for privilege escalation
-- A achieves SSRF, then B uses internal API access
-- A achieves auth bypass, then B performs sensitive action
-
-Computes transitive closure: A to C is valid if A to B to C exists.
+Builds an attack graph from all confirmed exploitable findings using networkx:
+- Findings are classified by vulnerability role (code_exec, file_access, information_theft, access_escalation, etc.)
+- Role transitions define valid chains: file_access → code_exec (LFI to RCE), information_theft → access_escalation (credential reuse), etc.
+- Computes full transitive closure via graph shortest paths — A → C is valid if A → B → C exists
+- Chains up to 50 most confident multi-step exploits are surfaced
 
 ### Steps 7-9: Validation, Anomaly, Report
 
-- Step 7: LLM-based precondition test (replaces keyword-based filters)
-- Step 8: Prompt injection detection
-- Step 9: Exhaustive report with coverage statistics
+- Step 7: Confidence-based filtering — CRITICAL and HIGH severity memory findings pass with >= 0.6 confidence; path analysis results are filtered by VERIFIED_EXPLOITABLE verdict
+- Step 8: Prompt injection detection via InjectionGuard statistical baseline
+- Step 9: Exhaustive report with coverage statistics, PoC ideas, and remediation
 
 ---
 
@@ -437,41 +438,39 @@ src/
   orchestrator.py                    Master pipeline + checkpointing
   main.py                            CLI entry point
   pipeline/
-    step0_fingerprint.py             Fingerprinting
+    step0_fingerprint.py             Fingerprinting + file inventory
     step1_classify.py                16+ target types
-    step2_deps.py                    Dependency vuln scan
-    step2_secrets.py                 Secrets scanner
-    step3_static.py                  Static analysis
-    step3b_codegraph.py              Code graph + source/sink/sanitizer tags
-    step4_threat_model.py            Threat model + CVE search
+    step2_deps.py                    Dependency vuln scan (NVD + EPSS/KEV)
+    step2_secrets.py                 Secrets scanner (gitleaks rules)
+    step3_static.py                  Semgrep scan + file inventory
+    step3b_codegraph.py              Code graph + source/sink/sanitizer tags + memory analysis
+    step4_threat_model.py            Threat model + CVE catalog
     step4b_path_enum.py              Exhaustive source-to-sink path enumeration
-    step4c_path_analyze.py           Per-path LLM exploitability analysis
-    step5_fuzz.py                    Legacy
-    step5b_triage.py                 Legacy
-    step6_deep_trace.py              Legacy
-    step7_chains.py                  Attack graph + chain synthesis
-    step7_validate.py                LLM-based precondition test
-    step8_anomaly.py                 Injection detection
-    step9_report.py                  Exhaustive report
+    step4c_path_analyze.py           Per-path LLM exploitability validation
+    step6_chains.py                  Attack graph + transitive chain synthesis
+    step8_anomaly.py                 Prompt injection detection
+    step9_report.py                  Exhaustive report with PoCs
   analysis/
-    ast_parser.py                    Multi-language tree-sitter parser
+    ast_parser.py                    Multi-language tree-sitter parser (+ regex fallback)
     call_graph.py                    Call graph with import resolution
     source_tag.py                    All untrusted entry points
     sink_tag.py                      All dangerous operations
-    sanitizer_tag.py                 All sanitizers
+    sanitizer_tag.py                 All sanitizers (with protected_against taxonomy)
     intra_taint.py                   Intra-procedural taint tracking
     inter_taint.py                   Inter-procedural taint propagation
-    path_enum.py                     Source-to-sink path enumeration
+    path_enum.py                     Source-to-sink path enumeration + sanitizer taxonomy
     path_analyze.py                  Per-path LLM analysis
-    attack_graph.py                  Multi-step chain synthesis
+    attack_graph.py                  networkx-based transitive chain synthesis
     scaling.py                       Large codebase support
+    semgrep_runner.py                External SAST integration
+    secrets_scanner.py               Entropy-filtered secrets detection
     memory/
       orchestrator.py                Memory analysis coordinator
       alloc_tracker.py               Allocation tracking
       buffer_analyzer.py             Buffer overflow detection
       lifetime.py                    Use-after-free, double-free
       int_overflow.py                Integer overflow detection
-      format_string.py               Format string vulnerability
+      format_string.py               Format string vulnerability (C/C++ unsafe only)
   knowledge/
     cve_db.py, downloader.py, importer.py, embeddings.py, epss.py, kev.py, sbom.py
   llm/
@@ -491,10 +490,13 @@ start_server.py, run_audit.py
 - Deterministic foundation plus LLM reasoning: code graph built deterministically, LLM validates pre-traced paths
 - Short, focused prompts: per-path analysis with ~2K token prompts
 - Clean context per batch: no memory between batches
-- LLM-based validation: precondition test uses LLM, not bypassable keyword filters
-- Product-specific CVEs: targeted to actual tech stack
+- Sanitizer-aware taint tracking: cross-taxonomy mapping between sink categories and sanitizer `protected_against` values
+- Inter-procedural taint accumulation: tainted variables propagate across function boundaries, not overwritten
+- LLM-based validation: LLM checks sanitizer effectiveness, static tags are signals not blockers
+- Product-specific CVEs: CVSS version-tagged, targeted to actual tech stack
+- 5 parallel memory analyzers: allocation, buffer, lifetime, integer overflow, format string (with language-specific FP filtering)
 - Config-driven model: switch models by changing one line in config.yaml
-- Scales to enterprise codebases: chunked processing, parallelism, path prioritization, adaptive config
+- Scales to enterprise codebases: single-pass file inventory, node-based AST reuse, adaptive config
 - Local only: no data leaves your machine, no API costs
 
 ---

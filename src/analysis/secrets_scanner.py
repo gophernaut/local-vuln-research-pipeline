@@ -25,31 +25,31 @@ class SecretMatch:
 
 SECRET_RULES = [
     ("aws-access-key", "AWS Access Key ID", r"(?<![A-Z0-9])AKIA[0-9A-Z]{16}(?![A-Z0-9])", 0),
-    ("aws-secret-key", "AWS Secret Access Key", r"(?i)aws.{0,20}(?:secret|pwd|password).{0,20}['\"]([A-Za-z0-9/+]{40})['\"]", 0),
-    ("github-token", "GitHub Token", r"(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,}", 0),
-    ("github-pat", "GitHub Personal Access Token", r"github_pat_[A-Za-z0-9_]{22,}", 0),
-    ("google-api-key", "Google API Key", r"AIza[0-9A-Za-z\-_]{35}", 0),
+    ("aws-secret-key", "AWS Secret Access Key", r"(?i)aws.{0,20}(?:secret|pwd|password).{0,20}['\"]([A-Za-z0-9/+]{40})['\"]", 4.5),
+    ("github-token", "GitHub Token", r"(ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,}", 4.0),
+    ("github-pat", "GitHub Personal Access Token", r"github_pat_[A-Za-z0-9_]{22,}", 4.0),
+    ("google-api-key", "Google API Key", r"AIza[0-9A-Za-z\-_]{35}", 3.5),
     ("google-oauth", "Google OAuth Client ID", r"[0-9]+-[A-Z0-9a-z_]{32}\.apps\.googleusercontent\.com", 0),
     ("private-key", "Private Key (BEGIN)", r"-----BEGIN (RSA|DSA|EC|OPENSSH|PGP) PRIVATE KEY-----", 0),
-    ("jwt-secret", "Hardcoded JWT Secret", r"(?i)(?:jwt|jwt_secret|secret_key|secret).{0,10}['\"]([A-Za-z0-9\-_+/=]{20,})['\"]", 0),
-    ("generic-password", "Hardcoded Password", r"(?i)(?:password|passwd|pwd).{0,10}['\"]([^'\"]{6,64})['\"]", 0),
-    ("generic-api-key", "Generic API Key", r"(?i)(?:api[_-]?key|apikey).{0,10}['\"]([A-Za-z0-9\-_]{20,})['\"]", 0),
-    ("generic-token", "Generic Token", r"(?i)(?:token|auth[_-]?token|access[_-]?token).{0,10}['\"]([A-Za-z0-9\-_/+]{16,})['\"]", 0),
+    ("jwt-secret", "Hardcoded JWT Secret", r"(?i)(?:jwt|jwt_secret|secret_key|secret).{0,10}['\"]([A-Za-z0-9\-_+/=]{20,})['\"]", 3.5),
+    ("generic-password", "Hardcoded Password", r"(?i)(?:password|passwd|pwd).{0,10}['\"]([^'\"]{6,64})['\"]", 3.0),
+    ("generic-api-key", "Generic API Key", r"(?i)(?:api[_-]?key|apikey).{0,10}['\"]([A-Za-z0-9\-_]{20,})['\"]", 3.5),
+    ("generic-token", "Generic Token", r"(?i)(?:token|auth[_-]?token|access[_-]?token).{0,10}['\"]([A-Za-z0-9\-_/+]{16,})['\"]", 3.5),
     ("database-url", "Database Connection String", r"(?i)(?:mysql|postgres|mongodb|redis|sqlite)://[^@\s]+@[^\s]+", 0),
-    ("slack-token", "Slack Token", r"xox[baprs]-[A-Za-z0-9\-]+", 0),
+    ("slack-token", "Slack Token", r"xox[baprs]-[A-Za-z0-9\-]+", 3.5),
     ("slack-webhook", "Slack Webhook URL", r"hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+", 0),
-    ("stripe-key", "Stripe API Key", r"(?:sk|pk)_(?:live|test)_[A-Za-z0-9]{24,}", 0),
-    ("npm-token", "npm Access Token", r"npm_[A-Za-z0-9]{36}", 0),
-    ("pypi-token", "PyPI Token", r"pypi-[A-Za-z0-9\-_]{36,}", 0),
+    ("stripe-key", "Stripe API Key", r"(?:sk|pk)_(?:live|test)_[A-Za-z0-9]{24,}", 3.5),
+    ("npm-token", "npm Access Token", r"npm_[A-Za-z0-9]{36}", 3.5),
+    ("pypi-token", "PyPI Token", r"pypi-[A-Za-z0-9\-_]{36,}", 3.5),
     ("heroku-key", "Heroku API Key", r"(?i)heroku.{0,20}[A-Fa-f0-9]{8}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{4}-[A-Fa-f0-9]{12}", 0),
-    ("discord-token", "Discord Bot Token", r"[MN][A-Za-z0-9]{23}\.[A-Za-z0-9\-_]{6}\.[A-Za-z0-9\-_]{27}", 0),
-    ("telegram-token", "Telegram Bot Token", r"\d{8,10}:AA[A-Za-z0-9\-_]{33}", 0),
-    ("generic-secret", "Hardcoded Secret", r"(?i)(?:secret).{0,10}['\"]([^'\"]{10,})['\"]", 0),
+    ("discord-token", "Discord Bot Token", r"[MN][A-Za-z0-9]{23}\.[A-Za-z0-9\-_]{6}\.[A-Za-z0-9\-_]{27}", 3.0),
+    ("telegram-token", "Telegram Bot Token", r"\d{8,10}:AA[A-Za-z0-9\-_]{33}", 3.5),
+    ("generic-secret", "Hardcoded Secret", r"(?i)(?:secret).{0,10}['\"]([^'\"]{10,})['\"]", 3.0),
     ("generic-credential", "Hardcoded Credential", r"(?i)(?:username|user).{0,10}['\"]([^'\"]+?)['\"].{0,20}(?:password|passwd|pwd).{0,10}['\"]([^'\"]+?)['\"]", 0),
     ("connection-string", "Connection String Pattern", r"(?i)(?:connection[_-]?string|conn[_-]?str).{0,10}['\"]([^'\"]{10,})['\"]", 0),
     ("dotenv-sensitive", "Sensitive .env Pattern", r"(?i)^\s*(SECRET|KEY|TOKEN|PASSWORD|CREDENTIALS?)\s*=", 0),
-    ("azure-storage-key", "Azure Storage Key", r"(?i)DefaultEndpointsProtocol=https.{0,200}AccountKey=[A-Za-z0-9+/=]{40,}", 0),
-    ("azure-sas", "Azure SAS Token", r"(?i)(?:sig|signature)=[A-Za-z0-9%]{20,}", 0),
+    ("azure-storage-key", "Azure Storage Key", r"(?i)DefaultEndpointsProtocol=https.{0,200}AccountKey=[A-Za-z0-9+/=]{40,}", 3.5),
+    ("azure-sas", "Azure SAS Token", r"(?i)(?:sig|signature)=[A-Za-z0-9%]{20,}", 3.0),
 ]
 
 
@@ -86,7 +86,14 @@ class SecretsScanner:
                       ".idea", ".vscode", "bin", "obj", "Debug", "Release"}
 
         for filepath in repo_path.rglob("*"):
-            if filepath.suffix.lower() not in text_extensions and filepath.name.lower() not in {".env", "dockerfile"}:
+            if not filepath.is_file():
+                continue
+            suffix = filepath.suffix.lower()
+            name_lower = filepath.name.lower()
+
+            has_text_ext = suffix in text_extensions
+            is_named_config = name_lower in {".env", "dockerfile"} or name_lower.startswith("dockerfile")
+            if not has_text_ext and not is_named_config:
                 continue
 
             skip = any(d in filepath.parts for d in skip_dirs)
@@ -141,11 +148,14 @@ class SecretsScanner:
         import math
         if not data:
             return 0.0
+        freq = {}
+        for ch in data:
+            freq[ch] = freq.get(ch, 0) + 1
+        length = len(data)
         entropy = 0.0
-        for x in range(256):
-            p_x = data.count(chr(x)) / len(data)
-            if p_x > 0:
-                entropy += -p_x * math.log2(p_x)
+        for count in freq.values():
+            p = count / length
+            entropy -= p * math.log2(p)
         return entropy
 
     def _is_false_positive(self, matched_text: str, filepath: str) -> bool:

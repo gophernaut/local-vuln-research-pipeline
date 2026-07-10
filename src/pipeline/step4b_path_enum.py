@@ -5,18 +5,15 @@ Each path is then analyzed for taint and sanitizers.
 """
 from __future__ import annotations
 
-import json
 import time
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from src.analysis.call_graph import CallGraphBuilder
 from src.analysis.path_enum import PathEnumerator
-from src.analysis.source_tag import SourceTagger, SourceTag
-from src.analysis.sink_tag import SinkTagger, SinkTag
-from src.analysis.sanitizer_tag import SanitizerTagger, SanitizerTag
-from src.analysis.ast_parser import ASTParser
+from src.analysis.source_tag import SourceTag
+from src.analysis.sink_tag import SinkTag
+from src.analysis.sanitizer_tag import SanitizerTag
 from src.utils.logger import get_logger
 from src.config import config
 
@@ -61,23 +58,23 @@ def run(repo_path: Path, code_graph: dict[str, Any]) -> dict[str, Any]:
 
     logger.info(f"  Inputs: {len(sources)} sources, {len(sinks)} sinks, {len(sanitizers)} sanitizers")
 
-    parser = ASTParser()
-    analyses = parser.parse_directory(repo_path)
-    file_analyses_map = {a.path: a for a in analyses}
+    cg_data = code_graph.get("code_graph", {})
+    stored_funcs = cg_data.get("functions", [])
 
     cg_builder = CallGraphBuilder()
     call_graph = cg_builder.build(repo_path)
 
-    logger.info("  Reconstructing functions and bodies...")
+    logger.info("  Loading function bodies from stored code graph...")
     functions_by_file = {}
+    func_lookup = {f["key"]: f for f in stored_funcs}
     for func_key, func in call_graph.nodes.items():
-        if func.file in file_analyses_map:
-            analysis = file_analyses_map[func.file]
-            for parsed_func in analysis.functions:
-                if parsed_func.name == func.name and parsed_func.file == func.file:
-                    func.body = parsed_func.body or func.body
-                    func.params = parsed_func.params or func.params
-                    break
+        stored = func_lookup.get(func_key, {})
+        body = stored.get("body", "") or func.body
+        if body:
+            func.body = body
+        if not func.params and stored.get("params"):
+            func.params = stored["params"]
+
         functions_by_file[func_key] = {
             "file": func.file,
             "name": func.name,
@@ -89,7 +86,7 @@ def run(repo_path: Path, code_graph: dict[str, Any]) -> dict[str, Any]:
     from src.analysis.call_graph import CallGraph
     for func_key, func_info in functions_by_file.items():
         func = call_graph.nodes[func_key]
-        call_sites = [
+        call_sites_data = [
             {
                 "function_name": cs.function_name,
                 "arguments": cs.arguments,
@@ -97,7 +94,7 @@ def run(repo_path: Path, code_graph: dict[str, Any]) -> dict[str, Any]:
             }
             for cs in func_info.get("call_sites", [])
         ]
-        func_info["call_sites"] = call_sites
+        func_info["call_sites"] = call_sites_data
         if func_key in call_graph.edges:
             for callee in call_graph.edges[func_key]:
                 func_info["call_sites"].append({
@@ -111,7 +108,7 @@ def run(repo_path: Path, code_graph: dict[str, Any]) -> dict[str, Any]:
 
     enumerator = PathEnumerator(max_depth=max_depth, max_paths_per_pair=max_paths_per_pair)
     paths = enumerator.enumerate_all_paths(
-        call_graph, sources, sinks, sanitizers, analyses
+        call_graph, sources, sinks, sanitizers, []
     )
 
     exploitable_count = sum(1 for p in paths if p.is_exploitable and not p.is_blocked_by_sanitizer)
