@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.utils.logger import get_logger
+from src.pipeline.step0_fingerprint import LANGUAGE_MAP
 
 logger = get_logger()
 
@@ -203,10 +204,11 @@ def _match_rule(fp: dict[str, Any], signals: dict[str, Any]) -> bool:
     if "extensions_contain" in signals:
         langs = fp.get("languages", {})
         exts_present = set()
-        for lang in langs:
-            for ext_info in signals["extensions_contain"]:
-                if ext_info in str(lang).lower() or ext_info in str(langs).lower():
-                    exts_present.add(ext_info)
+        ext_to_lang = {ext: lang for ext, lang in LANGUAGE_MAP.items()}
+        for ext_info in signals["extensions_contain"]:
+            mapped_lang = ext_to_lang.get(ext_info, ext_info)
+            if mapped_lang in langs and langs[mapped_lang] > 0:
+                exts_present.add(ext_info)
         if len(exts_present) < len(signals["extensions_contain"]) * 0.5:
             return False
 
@@ -274,6 +276,10 @@ def _find_file_recursive(repo_path: str, filename: str) -> bool:
         for fp in p.rglob(filename):
             if fp.is_file():
                 return True
+        if filename.startswith("."):
+            for fp in p.rglob(f"*{filename}"):
+                if fp.is_file():
+                    return True
     except Exception:
         pass
     return False

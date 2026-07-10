@@ -30,7 +30,7 @@ LANGUAGE_MAP = {
     ".php": "PHP",
     ".swift": "Swift",
     ".sh": "Shell", ".bash": "Shell", ".zsh": "Shell",
-    ".ps1": "PowerShell", ".psm1": "PowerShell",
+    ".ps1": "PowerShell", ".psm1": "PowerShell", ".psd1": "PowerShell",
 }
 
 BUILD_SIGNALS = {
@@ -57,10 +57,12 @@ FRAMEWORK_SIGNALS = {
     "django": "Django (Python)",
     "fastapi": "FastAPI (Python)",
     "flask": "Flask (Python)",
-    "express": "Express.js (Node)",
-    "next": "Next.js (React)",
-    "react": "React (JavaScript)",
-    "vue": "Vue.js",
+    "express.js": "Express.js (Node)",
+    "expressjs": "Express.js (Node)",
+    "next.js": "Next.js (React)",
+    "nextjs": "Next.js (React)",
+    "vue.js": "Vue.js",
+    "vuejs": "Vue.js",
     "angular": "Angular",
     "nestjs": "NestJS (Node)",
     "rails": "Ruby on Rails",
