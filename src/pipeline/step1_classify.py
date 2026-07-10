@@ -154,7 +154,6 @@ def run(fingerprint: dict[str, Any]) -> dict[str, Any]:
         if _match_rule(fingerprint, rule["signals"]):
             result = _build_result(fingerprint, rule)
             logger.info(f"  Class: {result['primary_class']} ({result['display_name']})")
-            logger.info(f"  Refs: {', '.join(result['loaded_refs'])}")
             return result
 
     result = _build_result(fingerprint, DEFAULT_CLASSIFICATION)
@@ -170,19 +169,18 @@ def _match_rule(fp: dict[str, Any], signals: dict[str, Any]) -> bool:
     if "build_files" in signals:
         bf = set(fp.get("build_systems", []))
         build_signals = signals["build_files"]
-        # Check if any build file exists (not system name, actual filename)
-        # We check build_systems from fingerprint + raw file check
         found = False
         for b in build_signals:
             if b in bf:
                 found = True
                 break
-            # Also check if the file literally exists (for Kconfig, Kbuild, etc)
+            # Check if build system name maps to this file
+            if b == ".csproj" and "MSBuild" in bf:
+                found = True
+                break
+            # Recursive search for the actual filename
             if not found:
-                for f in _list_files(fp.get("repo_path", ""), 200):
-                    if f.endswith(b) or b in f:
-                        found = True
-                        break
+                found = _find_file_recursive(fp.get("repo_path", ""), b)
         if not found:
             return False
 
@@ -269,6 +267,18 @@ def _files_contain(repo_path: str, keywords: list[str]) -> bool:
     return True
 
 
+def _find_file_recursive(repo_path: str, filename: str) -> bool:
+    from pathlib import Path
+    p = Path(repo_path)
+    try:
+        for fp in p.rglob(filename):
+            if fp.is_file():
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _list_files(repo_path: str, limit: int) -> list[str]:
     from pathlib import Path
     p = Path(repo_path)
@@ -284,14 +294,6 @@ def _list_files(repo_path: str, limit: int) -> list[str]:
 
 
 def _build_result(fp: dict[str, Any], rule: dict[str, Any]) -> dict[str, Any]:
-    refs = list(rule["refs"])
-
-    if fp.get("build_systems") and "supply-chain.md" not in refs:
-        refs.append("supply-chain.md")
-
-    if fp.get("ecosystems") and "supply-chain.md" not in refs:
-        refs.append("supply-chain.md")
-
     primary = rule["primary"]
     secondary = []
 
@@ -306,7 +308,7 @@ def _build_result(fp: dict[str, Any], rule: dict[str, Any]) -> dict[str, Any]:
         "primary_class": primary,
         "secondary_classes": secondary,
         "display_name": rule["name"],
-        "loaded_refs": refs,
+        "loaded_refs": ["universal-audit"],
         "rationale": f"Matched: {rule['name']}",
         "key_signals": {
             "language": fp.get("primary_language"),

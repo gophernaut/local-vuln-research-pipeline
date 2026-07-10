@@ -309,21 +309,37 @@ def _build_initial_prompt(hyp: dict, code_bundle: dict) -> str:
 
 
 def _methodology_for(primary: str) -> str:
-    return {
-        "web_app": "Trace HTTP -> middleware -> handler -> service -> data layer.",
-        "kernel": "Trace syscall/ioctl -> copy_from_user -> validation -> kernel op. Check bounds, locking, refcounts.",
-        "native_memory": "Trace input -> allocation -> buffer op. Check bounds, lifetime, allocator.",
-        "java_platform": "Trace HTTP/deserialization -> filter -> controller -> service -> ORM.",
-        "dotnet": "Trace HTTP/deserialization -> middleware -> controller -> service. Check PowerShell invocation.",
-        "powershell": "Trace param/input -> cmdlet/internal API -> dangerous operation (Invoke-Expression, Add-Script, COM). Check input validation.",
-        "compiler": "Trace input file -> lexer/parser -> AST -> codegen. Check parser correctness, bounds, overflow.",
-        "ai_framework": "Trace model input -> deserialization -> graph execution -> native kernel. Check serialization, FFI, memory.",
-        "embedded": "Trace peripheral input -> ISR -> buffer -> processing. Check bounds, interrupt safety, DMA.",
-        "distributed": "Trace API call -> proxy -> handler -> internal RPC. Check auth propagation, trust boundaries.",
-        "container": "Trace API -> runtime -> namespace/cgroup -> host interface. Check capability, mount, escape.",
-        "cli_tool": "Trace CLI arg/env -> parser -> execution/IO. Check injection, traversal, symlink races.",
-        "browser_sandbox": "Trace IPC -> renderer -> browser boundary. Check message validation, sandbox policy.",
-    }.get(primary, "Trace entry point through all intermediaries to sink. Check every guard.")
+    """Universal methodology — no shortcutting by classification. Check everything."""
+    return (
+        "UNIVERSAL METHODOLOGY — check ALL of the following, regardless of target type:\n\n"
+        "COMMAND INJECTION: Trace user input to Process.Start, PowerShell.Create, system(), exec(). "
+        "Check if any shell metacharacters survive sanitization. Check argument vs command injection separately.\n\n"
+        "PATH TRAVERSAL: Trace user input to File.Read/Write, Directory operations, Path.Combine. "
+        "Check canonicalization, symlink races, zip-slip, alternate data streams.\n\n"
+        "DESERIALIZATION: Find all deserialization points. Trace type resolution — can the attacker "
+        "control the type? Check SerializationBinder, TypeNameHandling, allowed types.\n\n"
+        "CODE INJECTION: Find eval(), Invoke-Expression, ScriptBlock.Create, AddScript, expression languages. "
+        "Check if any part of the evaluated code is attacker-controlled.\n\n"
+        "AUTH BYPASS: Trace auth middleware, session validation, JWT verification, role checks. "
+        "Look for missing checks on specific endpoints, direct object references, privilege escalation paths.\n\n"
+        "SSRF: Find HttpClient/WebRequest with dynamic URLs. Check URL validation — can attacker "
+        "point it at internal services, cloud metadata, file:// schemes?\n\n"
+        "SQL/NoSQL INJECTION: Find all database queries. Check parameterization vs concatenation. "
+        "For NoSQL, check $where, $expr, and other evaluation operators.\n\n"
+        "RACE CONDITIONS: Find shared mutable state (static fields, singletons, caches). "
+        "Check locking, TOCTOU between check and use, multi-threaded access patterns.\n\n"
+        "CRYPTO: Find hardcoded keys, weak algorithms (MD5/SHA1/DES/RC4), predictable IVs, "
+        "missing MAC/signature verification, key leakage through errors or timing.\n\n"
+        "MEMORY (if C/C++/unsafe Rust): Check all allocations, buffer accesses, pointer arithmetic. "
+        "Look for missing bounds checks, use-after-free, double-free, integer overflow.\n\n"
+        "INFORMATION DISCLOSURE: Check error messages, debug endpoints, stack traces in responses, "
+        "path disclosure, timing side channels, sensitive data in logs.\n\n"
+        "LOGIC FLAWS: Check business logic for exploitable edge cases — negative quantities, "
+        "integer overflow in calculations, type confusion, state machine bypass, race windows.\n\n"
+        "Trace the FULL data flow from attacker-controlled entry point through EVERY "
+        "function call, variable assignment, and transformation to the dangerous sink. "
+        "At each step, check: is there a validator? Can it be bypassed? Is there an indirect path?"
+    )
 
 
 def _skip(p: Path) -> bool:

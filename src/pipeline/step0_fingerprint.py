@@ -139,7 +139,7 @@ def run(repo_path: Path) -> dict[str, Any]:
 
 
 def _detect_frameworks(repo_path: Path, frameworks: set[str]):
-    """Only scan manifest/config files for framework signals, not every source file."""
+    """Only scan manifest/config files for framework signals, skipping test dirs."""
     manifest_files = _find_manifest_files(repo_path)
     for f in manifest_files:
         try:
@@ -152,10 +152,13 @@ def _detect_frameworks(repo_path: Path, frameworks: set[str]):
 
 
 def _find_manifest_files(repo_path: Path) -> list[Path]:
+    TEST_DIRS = {"test", "tests", "spec", "fixtures", "mocks", "__tests__", "benchmarks"}
     manifest = []
     for f in repo_path.rglob("*"):
         if f.is_file() and (f.name in BUILD_SIGNALS or f.suffix.lower() in MANIFEST_EXTS):
-            manifest.append(f)
+            parts = set(p.lower() for p in f.parts)
+            if not parts.intersection(TEST_DIRS):
+                manifest.append(f)
         if len(manifest) >= 200:
             break
     return manifest
