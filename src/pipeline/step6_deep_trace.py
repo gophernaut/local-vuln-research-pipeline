@@ -18,8 +18,8 @@ from src.utils.logger import get_logger
 
 logger = get_logger()
 
-_context = config.get("server.context_length", 49152)
-MAX_CODE = max(50000, (_context - 12000) * 4)
+_context = config.get("server.context_length", 32768)
+MAX_CODE = max(30000, int((_context - 8000) * 3.5))
 
 MAX_ITERATIONS = 5
 SKIP_DIRS = {"node_modules", ".git", "__pycache__", ".venv", "venv",

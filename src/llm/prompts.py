@@ -154,6 +154,48 @@ OUTPUT FORMAT — valid JSON:
 """
 
 
+def audit_single_pass(target: str, language: str, cve_text: str) -> str:
+    cve_hint = ""
+    if cve_text:
+        cve_hint = f"\n\nCVE PATTERNS (known exploits for this stack):\n{cve_text[:1500]}"
+    return f"""{GUARD_PREAMBLE}
+
+Review the code below for security vulnerabilities. Report anything exploitable.
+Target: {target} | Language: {language}
+
+CHECK EVERY FUNCTION AND METHOD FOR:
+1. COMMAND INJECTION: exec/system/Process.Start/AddScript with user input
+2. PATH TRAVERSAL: user input in file paths, File.Read/Write, Path.Combine
+3. CODE INJECTION: eval/Invoke-Expression/ScriptBlock with user input
+4. DESERIALIZATION: BinaryFormatter/JsonConvert with untrusted types
+5. AUTH BYPASS: missing auth checks on sensitive code paths
+6. SSRF: HTTP clients with attacker-controlled URLs
+7. HARDCODED SECRETS: passwords, tokens, API keys in source
+8. RACE CONDITIONS: shared state without locks, TOCTOU on file ops
+9. INFO LEAK: stack traces, sensitive data in errors, debug endpoints
+
+For each finding, first ask: can a real attacker reach this? If the code path
+is behind auth, test code, or dead code — skip it. Only report REACHABLE issues.
+{cve_hint}
+
+Output valid JSON:
+{{"candidates": [
+  {{"vulnerability_class": "Command Injection via Process.Start",
+    "component": "path/file.cs:42 — FunctionName",
+    "entry_point": "how attacker reaches this code",
+    "entry_point_type": "HTTP_POST|CLI_ARG|PS_PARAM|FILE_PARSE|IPC",
+    "sink": "file:line of dangerous operation",
+    "description": "what the vulnerability is and why exploitable",
+    "source_reasoning": "quote the actual vulnerable lines and explain the exploit path",
+    "severity": "CRITICAL|HIGH|MEDIUM|LOW",
+    "confidence": "HIGH|MEDIUM|LOW",
+    "cwe_id": "CWE-78",
+    "requires_authentication": true/false
+  }}
+]}}
+"""
+
+
 def pattern_scan_system(target: str, language: str, primary: str, cve_text: str) -> str:
     cve_hint = f"\n\nREFERENCE CVE PATTERNS (known exploits for this stack):\n{cve_text}" if cve_text else ""
     return f"""{GUARD_PREAMBLE}

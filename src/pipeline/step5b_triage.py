@@ -21,8 +21,8 @@ from src.utils.logger import get_logger
 
 logger = get_logger()
 
-_context = config.get("server.context_length", 49152)
-MAX_CODE = max(30000, (_context - 12000) * 4)
+_context = config.get("server.context_length", 32768)
+MAX_CODE = max(20000, int((_context - 10000) * 3.5))
 
 TRIAGE_PROMPT = """You are a skeptical vulnerability verifier. Your default position: DISTRUST every claim.
 The fuzzer that found these is known to hallucinate. Your job is to determine what's REAL.

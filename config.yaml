@@ -2,10 +2,10 @@
 # Values with {AUTO} are set by benchmark/eval runs
 
 model:
-  name: "Qwen2.5-Coder-7B-Abliterated"
-  quant: "Q6_K"
-  file: "models/Qwen2.5-Coder-7B-Instruct-abliterated-Q6_K.gguf"
-  download_url: "https://huggingface.co/bartowski/Qwen2.5-Coder-7B-Instruct-abliterated-GGUF"
+  name: "Qwen2.5-Coder-14B-Abliterated"
+  quant: "Q4_K_M"
+  file: "models/Qwen2.5-Coder-14B-Instruct-abliterated-Q4_K_M.gguf"
+  download_url: "https://huggingface.co/bartowski/Qwen2.5-Coder-14B-Instruct-abliterated-GGUF"
   draft_file: "models/Qwen2.5-Coder-0.5B-Instruct-abliterated-Q4_K_M.gguf"
   draft_download_url: "https://huggingface.co/bartowski/Qwen2.5-Coder-0.5B-Instruct-abliterated-GGUF"
 
@@ -15,7 +15,7 @@ server:
   threads: 8
   batch_size: 2048
   ubatch_size: 512
-  context_length: 131072     # 131K context — 7B model leaves ~9GB for KV cache
+  context_length: 32768     # Model training context — server caps here automatically
   flash_attn: true
   cache_type_k: "q4_0"
   cache_type_v: "q4_0"
