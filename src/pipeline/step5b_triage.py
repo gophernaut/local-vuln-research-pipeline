@@ -160,7 +160,7 @@ def run(
         for fname, content in code_files.items():
             code_text += f"\n--- {fname} ---\n{content}\n"
 
-        max_code = 90000
+        max_code = 120000
         if len(code_text) > max_code:
             code_text = code_text[:max_code] + "\n// ... [truncated at context limit]"
 

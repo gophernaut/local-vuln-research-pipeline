@@ -269,7 +269,7 @@ def _read_files(paths: list[Path], repo_root: Path, loaded: set[str]) -> dict[st
     code_files: dict[str, str] = {}
     total = 0
     for f in paths:
-        if total > 200000:
+        if total > 140000:
             break
         rel = str(f.relative_to(repo_root))
         if rel in loaded:

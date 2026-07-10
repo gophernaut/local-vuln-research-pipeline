@@ -21,7 +21,7 @@ from src.utils.logger import get_logger
 
 logger = get_logger()
 
-MAX_CODE_CHARS_PER_PASS = 60000
+MAX_CODE_CHARS_PER_PASS = 140000
 
 FUZZ_PASS_PROMPT = """You are an elite offensive security researcher performing a whitebox code audit.
 Your target is the code below. Your mission: find every exploitable vulnerability in these files.
@@ -239,7 +239,7 @@ THREAT SURFACE MAP:
         user = f"{audit_prompt} Report every plausible vulnerability. Output valid JSON.\n\n{code_text}"
 
         try:
-            result = client.chat_json(system, user, max_tokens=4096, temperature=0.4)
+            result = client.chat_json(system, user, max_tokens=2048, temperature=0.4)
         except Exception as e:
             logger.warning(f"    LLM call failed: {e}")
             result = {}
