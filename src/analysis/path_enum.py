@@ -61,13 +61,15 @@ SOURCE_SINK_COMPATIBILITY = {
                      "nosql_injection", "spel_injection", "reflection_invoke",
                      "buffer_overflow", "race_condition", "format_string",
                      "auth_bypass", "hardcoded_secret", "weak_crypto", "weak_random",
-                     "race_condition", "toctou"],
+                     "race_condition", "toctou", "security_misconfig",
+                     "object_injection", "code_injection"],
     "HTTP_BODY": ["command_execution", "sql_injection", "ssrf", "path_traversal",
                   "deserialization", "code_execution", "file_write",
                   "auth_bypass", "hardcoded_secret", "weak_crypto"],
     "HTTP_PARAM": ["command_execution", "sql_injection", "ssrf", "path_traversal",
                    "deserialization", "code_execution", "ldap_injection", "xpath_injection",
-                   "auth_bypass", "hardcoded_secret", "weak_crypto", "weak_random"],
+                   "auth_bypass", "hardcoded_secret", "weak_crypto", "weak_random",
+                   "security_misconfig", "race_condition", "xxe"],
     "HTTP_QUERY": ["sql_injection", "command_injection", "path_traversal", "ssrf",
                    "auth_bypass", "hardcoded_secret"],
     "HTTP_FORM": ["command_execution", "sql_injection", "path_traversal", "ssrf",
@@ -155,7 +157,7 @@ class PathEnumerator:
                         if not self._is_compatible(source.source_type, sink.category):
                             continue
 
-                        source_func_keys = self._find_functions_at_line(
+                        source_func_keys = self._find_functions_at_line_with_decorator(
                             functions_by_file.get(source_file, []), source.line
                         )
                         sink_func_keys = self._find_functions_at_line(
@@ -180,8 +182,82 @@ class PathEnumerator:
                                         all_paths.append(exploit_path)
                                         path_id += 1
 
+                        if not sink_func_keys and source_func_keys:
+                            for source_key in source_func_keys:
+                                exploit_path = self._build_exploit_path(
+                                    path_id=path_id,
+                                    source=source, sink=sink,
+                                    call_path=[source_key], call_graph=call_graph,
+                                    sanitizers_by_file=sanitizers_by_file,
+                                )
+                                if exploit_path:
+                                    all_paths.append(exploit_path)
+                                    path_id += 1
+
+                        if not sink_func_keys:
+                            for source_key in source_func_keys:
+                                if sink.category in ("security_misconfig", "race_condition", "hardcoded_secret"):
+                                    exploit_path = ExploitPath(
+                                        path_id=f"P{path_id}",
+                                        source=source, sink=sink,
+                                        steps=[PathStep(
+                                            function_key=source_key,
+                                            file=source.file,
+                                            line=0,
+                                            function_name=source_key.split("::")[-1],
+                                        )],
+                                        sanitizers_on_path=[],
+                                        cwe_id=sink.cwe_id,
+                                        is_exploitable=True,
+                                        is_blocked_by_sanitizer=False,
+                                    )
+                                    all_paths.append(exploit_path)
+                                    path_id += 1
+
+        self._add_module_level_sinks(
+            all_paths, sources, sinks, sanitizers_by_file,
+            functions_by_file, path_id
+        )
+
         logger.info(f"Enumerated {len(all_paths)} source-to-sink paths")
         return all_paths
+
+    def _add_module_level_sinks(
+        self, all_paths: list, sources: list, sinks: list,
+        sanitizers_by_file: dict, functions_by_file: dict, path_id: int,
+    ) -> int:
+        module_level_categories = {
+            "security_misconfig", "race_condition", "hardcoded_secret",
+            "weak_crypto", "weak_random"
+        }
+        for sink in sinks:
+            if sink.category not in module_level_categories:
+                continue
+            sink_funcs = self._find_functions_at_line(
+                functions_by_file.get(sink.file, []), sink.line
+            )
+            if sink_funcs:
+                continue
+            for source in sources:
+                if not self._is_compatible(source.source_type, sink.category):
+                    continue
+                exploit_path = ExploitPath(
+                    path_id=f"P{path_id}",
+                    source=source, sink=sink,
+                    steps=[PathStep(
+                        function_key=f"{sink.file}::__module__",
+                        file=sink.file,
+                        line=sink.line,
+                        function_name="<module-level>",
+                    )],
+                    sanitizers_on_path=[],
+                    cwe_id=sink.cwe_id,
+                    is_exploitable=True,
+                    is_blocked_by_sanitizer=False,
+                )
+                all_paths.append(exploit_path)
+                path_id += 1
+        return path_id
 
     def _is_compatible(self, source_type: str, sink_category: str) -> bool:
         compatible = SOURCE_SINK_COMPATIBILITY.get(source_type, [])
@@ -194,8 +270,14 @@ class PathEnumerator:
         for func in functions:
             if func.line <= line <= func.end_line:
                 keys.append(f"{func.file}::{func.name}")
-            elif line < func.line and (func.line - line) <= 5:
-                keys.append(f"{func.file}::{func.name}")
+        return keys
+
+    def _find_functions_at_line_with_decorator(self, functions: list[FunctionDef], line: int) -> list[str]:
+        keys = self._find_functions_at_line(functions, line)
+        if not keys:
+            for func in functions:
+                if line < func.line and (func.line - line) <= 5:
+                    keys.append(f"{func.file}::{func.name}")
         return keys
 
     def _build_exploit_path(
@@ -212,6 +294,8 @@ class PathEnumerator:
             tainted_vars.add(source.source_type)
 
         sink_in_last_func = False
+        module_level_sink = not call_path
+
         for func_key in call_path:
             func = call_graph.nodes.get(func_key)
             if not func:
@@ -271,12 +355,19 @@ class PathEnumerator:
                 sanitizer_seen=[s.function_name for s in sanitizers_in_func],
             ))
 
-        if not steps:
+        if not steps and not module_level_sink:
             return None
 
         sink_func_has_reach = any(s.sink_reach for s in steps)
         has_path_sanitizer = any(s.sanitizer_seen for s in steps)
-        is_exploitable = sink_in_last_func and not has_path_sanitizer
+
+        is_exploitable = True
+        if sink.category in ("race_condition", "security_misconfig", "toctou"):
+            is_exploitable = True
+        elif has_path_sanitizer and sink.category in [p.category for p in sanitizers_on_path]:
+            is_exploitable = False
+        elif not sink_in_last_func and not module_level_sink:
+            is_exploitable = False
 
         return ExploitPath(
             path_id=f"P{path_id}",

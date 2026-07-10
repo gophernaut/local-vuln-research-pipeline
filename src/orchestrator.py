@@ -1,4 +1,4 @@
-"""Pipeline orchestrator — runs all steps with the new exhaustive architecture.
+"""Pipeline orchestrator: runs all steps with the new exhaustive architecture.
 
 Replaces the old LLM-batched file review with deterministic source-to-sink
 path enumeration + per-path LLM validation.
