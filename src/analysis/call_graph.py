@@ -7,6 +7,7 @@ Provides: callers, callees, reachability, path finding.
 from __future__ import annotations
 
 import os
+import re
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path

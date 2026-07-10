@@ -51,14 +51,20 @@ def _ts_query(lang_obj, query_string: str):
     if not TREE_SITTER_AVAILABLE:
         return None
     try:
-        from tree_sitter import Query, QueryCursor
-        import textwrap
-        cleaned = textwrap.dedent(query_string).strip()
+        from tree_sitter import Query, QueryCursor, Language
+        if not isinstance(lang_obj, Language):
+            lang_obj = Language(lang_obj)
+        lines = query_string.split("\n")
+        non_empty = [l for l in lines if l.strip()]
+        if non_empty:
+            min_indent = min(len(l) - len(l.lstrip()) for l in non_empty)
+            cleaned = "\n".join(l[min_indent:] if len(l) >= min_indent else l for l in lines)
+        else:
+            cleaned = query_string
+        cleaned = cleaned.strip()
         query = Query(lang_obj, cleaned)
         return query
-    except Exception as e:
-        import sys
-        print(f'Query compile error: {e}', file=sys.stderr)
+    except Exception:
         return None
 
 
@@ -77,7 +83,9 @@ LANGUAGE_EXTENSIONS = {
     ".py": "python", ".pyi": "python",
     ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript",
     ".ts": "typescript", ".tsx": "typescript",
-    ".java": "java", ".kt": "java", ".scala": "java",
+    ".java": "java",
+    ".kt": "kotlin", ".kts": "kotlin",
+    ".scala": "scala", ".sc": "scala",
     ".c": "c", ".h": "c",
     ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp", ".hpp": "cpp",
     ".go": "go",
@@ -224,34 +232,28 @@ class ASTParser:
 
         try:
             self._extract_functions(root, source, analysis)
-        except Exception as e:
-            import sys
-            print(f'function extract error: {e}', file=sys.stderr)
+        except Exception:
+            pass
         try:
             self._extract_call_sites(root, source, analysis)
-        except Exception as e:
-            import sys
-            print(f'call sites error: {e}', file=sys.stderr)
+        except Exception:
+            pass
         try:
             self._extract_entry_points(root, source, analysis)
-        except Exception as e:
-            import sys
-            print(f'entry points error: {e}', file=sys.stderr)
+        except Exception:
+            pass
         try:
             self._extract_imports(root, source, analysis)
-        except Exception as e:
-            import sys
-            print(f'imports error: {e}', file=sys.stderr)
+        except Exception:
+            pass
         try:
             self._extract_classes(root, source, analysis)
-        except Exception as e:
-            import sys
-            print(f'classes error: {e}', file=sys.stderr)
+        except Exception:
+            pass
         try:
             self._extract_variables(root, source, analysis)
-        except Exception as e:
-            import sys
-            print(f'variables error: {e}', file=sys.stderr)
+        except Exception:
+            pass
 
         return analysis
 
@@ -296,14 +298,13 @@ class ASTParser:
                     body: (block) @body) @func""",
             "c": """(function_definition
                     declarator: (function_declarator
-                        declarator: (identifier) @name
-                        parameters: (parameter_list) @params)
+                        declarator: (identifier) @name)
                     body: (compound_statement) @body) @func""",
             "cpp": """(function_definition
                     declarator: (function_declarator
                         declarator: [(identifier) @name
-                                      (field_identifier) @name]
-                        parameters: (parameter_list) @params)
+                                      (field_identifier) @name
+                                      (qualified_identifier) @name])
                     body: (compound_statement) @body) @func""",
             "go": """(function_declaration
                     name: (identifier) @name
@@ -314,6 +315,10 @@ class ASTParser:
                     parameters: (parameters) @params
                     body: (block) @body) @func""",
             "csharp": """(method_declaration
+                    name: (identifier) @name
+                    parameters: (parameter_list) @params
+                    body: (block) @body) @func
+                (constructor_declaration
                     name: (identifier) @name
                     parameters: (parameter_list) @params
                     body: (block) @body) @func""",
@@ -477,9 +482,9 @@ class ASTParser:
                               (field_expression
                                 field: (field_identifier) @attr)]) @call""",
             "csharp": """(invocation_expression
-                    function: [(identifier_name) @func_name
+                    function: [(identifier) @func_name
                               (member_access_expression
-                                name: (identifier_name) @attr)]) @call""",
+                                name: (identifier) @attr)]) @call""",
         }
 
         query_str = queries.get(lang)
@@ -540,6 +545,10 @@ class ASTParser:
             self._js_entry_points(source, analysis)
         elif lang == "java":
             self._java_entry_points(source, analysis)
+        elif lang == "kotlin":
+            self._kotlin_entry_points(source, analysis)
+        elif lang == "scala":
+            self._scala_entry_points(source, analysis)
         elif lang in ("c", "cpp"):
             self._native_entry_points(source, analysis)
         elif lang == "go":
@@ -554,6 +563,10 @@ class ASTParser:
             self._php_entry_points(source, analysis)
         elif lang == "powershell":
             self._powershell_entry_points(source, analysis)
+        elif lang == "swift":
+            self._swift_entry_points(source, analysis)
+        elif lang == "shell":
+            self._shell_entry_points(source, analysis)
 
     def _python_entry_points(self, source: str, analysis: FileAnalysis):
         patterns = [
@@ -661,7 +674,7 @@ class ASTParser:
             (r"http\.ListenAndServe\s*\(", "SERVER_LISTEN"),
             (r"net\.Listen\s*\(", "SERVER_LISTEN"),
             (r"func\s+\w+\s*\(\s*w\s+http\.ResponseWriter", "HTTP_HANDLER"),
-            (r"grpc\.NewServer\s*\()", "GRPC_SERVER"),
+            (r"grpc\.NewServer\s*\(", "GRPC_SERVER"),
         ]
         for pattern, ep_type in patterns:
             for m in re.finditer(pattern, source):
@@ -770,6 +783,78 @@ class ASTParser:
                     name=f"ep_{line}", description=f"{ep_type} entry point",
                 ))
 
+    def _kotlin_entry_points(self, source: str, analysis: FileAnalysis):
+        patterns = [
+            (r"@GetMapping\b", "HTTP_ROUTE"),
+            (r"@PostMapping\b", "HTTP_ROUTE"),
+            (r"@PutMapping\b", "HTTP_ROUTE"),
+            (r"@DeleteMapping\b", "HTTP_ROUTE"),
+            (r"@RequestMapping\b", "HTTP_ROUTE"),
+            (r"@RestController\b", "REST_CONTROLLER"),
+            (r"@Controller\b", "CONTROLLER"),
+            (r"fun\s+main\s*\(", "MAIN_ENTRY"),
+            (r"\bServlet\s*\(", "SERVLET"),
+        ]
+        for pattern, ep_type in patterns:
+            for m in re.finditer(pattern, source):
+                line = source[:m.start()].count("\n") + 1
+                analysis.entry_points.append(EntryPoint(
+                    file=analysis.path, line=line, type=ep_type,
+                    name=f"ep_{line}", description=f"{ep_type} entry point",
+                ))
+
+    def _scala_entry_points(self, source: str, analysis: FileAnalysis):
+        patterns = [
+            (r"@(?:Get|Post|Put|Delete|Request)Mapping", "HTTP_ROUTE"),
+            (r"def\s+main\s*\(", "MAIN_ENTRY"),
+            (r"extends\s+Controller\b", "CONTROLLER"),
+            (r"@Path\s*\(", "JAX_RS"),
+            (r"@GET|@POST|@PUT|@DELETE", "JAX_RS"),
+            (r"object\s+\w+\s+extends\s+App", "MAIN_ENTRY"),
+            (r"def\s+\w+\s*\([^)]*Request\b", "HTTP_HANDLER"),
+            (r"play\.api\.mvc\.\w+", "PLAY_ROUTE"),
+        ]
+        for pattern, ep_type in patterns:
+            for m in re.finditer(pattern, source):
+                line = source[:m.start()].count("\n") + 1
+                analysis.entry_points.append(EntryPoint(
+                    file=analysis.path, line=line, type=ep_type,
+                    name=f"ep_{line}", description=f"{ep_type} entry point",
+                ))
+
+    def _swift_entry_points(self, source: str, analysis: FileAnalysis):
+        patterns = [
+            (r"func\s+main\s*\(", "MAIN_ENTRY"),
+            (r"@main\s+", "MAIN_ENTRY"),
+            (r"@UIApplicationMain", "APP_ENTRY"),
+            (r"@AppDelegate", "APP_ENTRY"),
+            (r"@IBOutlet\s+@\w+\s+", "IB_ACTION"),
+            (r"override\s+func\s+viewDidLoad", "LIFECYCLE"),
+            (r"\bapplication\s*\([^)]*didFinishLaunchingWithOptions", "LIFECYCLE"),
+        ]
+        for pattern, ep_type in patterns:
+            for m in re.finditer(pattern, source):
+                line = source[:m.start()].count("\n") + 1
+                analysis.entry_points.append(EntryPoint(
+                    file=analysis.path, line=line, type=ep_type,
+                    name=f"ep_{line}", description=f"{ep_type} entry point",
+                ))
+
+    def _shell_entry_points(self, source: str, analysis: FileAnalysis):
+        patterns = [
+            (r"#!/bin/(?:ba)?sh", "MAIN_ENTRY"),
+            (r"#!/usr/bin/env\s+(?:ba)?sh", "MAIN_ENTRY"),
+            (r"^main\s*\(\s*\)", "MAIN_ENTRY"),
+            (r"^\s*function\s+main\s*", "MAIN_ENTRY"),
+        ]
+        for pattern, ep_type in patterns:
+            for m in re.finditer(pattern, source, re.MULTILINE):
+                line = source[:m.start()].count("\n") + 1
+                analysis.entry_points.append(EntryPoint(
+                    file=analysis.path, line=line, type=ep_type,
+                    name=f"ep_{line}", description=f"{ep_type} entry point",
+                ))
+
     def _extract_imports(self, node, source: str, analysis: FileAnalysis):
         lang = analysis.language
         parser_obj = self._parsers.get(lang)
@@ -797,7 +882,7 @@ class ASTParser:
                         path: [(interpreted_string_literal) @module
                               (raw_string_literal) @module]))""",
             "rust": """(use_declaration
-                    path: (scoped_identifier) @module)""",
+                    (scoped_identifier) @module)""",
             "csharp": """(using_directive
                     (qualified_name) @module)""",
         }
@@ -1012,6 +1097,17 @@ class ASTParser:
             ],
             "kotlin": [
                 r"fun\s+(\w+)\s*\(",
+                r"suspend\s+fun\s+(\w+)\s*\(",
+                r"private\s+fun\s+(\w+)\s*\(",
+                r"public\s+fun\s+(\w+)\s*\(",
+                r"protected\s+fun\s+(\w+)\s*\(",
+                r"internal\s+fun\s+(\w+)\s*\(",
+            ],
+            "scala": [
+                r"def\s+(\w+)\s*\(",
+                r"private\s+def\s+(\w+)\s*\(",
+                r"public\s+def\s+(\w+)\s*\(",
+                r"protected\s+def\s+(\w+)\s*\(",
             ],
         }
 
