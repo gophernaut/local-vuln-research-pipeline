@@ -41,64 +41,80 @@ EXPLOIT_CLASSES = {
     "integer_overflow": ["CWE-190", "CWE-191", "CWE-680"],
 }
 
-THREAT_MODEL_PROMPT = """You are building a THREAT MODEL for a codebase audit. This is the foundation 
-for all subsequent vulnerability hunting passes. Be thorough. Cite exact file:line references.
+THREAT_MODEL_PROMPT = """You are a security architect building an ATTACK SURFACE MAP for a whitebox code audit.
+This is the master blueprint every subsequent audit pass will reference.
+Be EXHAUSTIVE. Every entry point you miss is a vulnerability that won't be found.
 
 BUILD THIS STRUCTURED MAP:
 
-1. ENTRY POINT INVENTORY
-   For EVERY externally reachable entry point in this codebase, list:
-   - File:line reference
-   - Type: HTTP_ROUTE | CLI_ARG | FILE_PARSE | IPC | SYSCALL | IOCTL | PLUGIN_API | FFI | ENV_VAR
-   - What data enters the system (query params, body, CLI args, file contents, etc.)
-   - Authentication required? (none | user | admin | system)
-   - Brief description of what it does
+1. ENTRY POINT INVENTORY (complete — find EVERY way data enters the system)
+   For EVERY externally reachable entry point, list:
+   - Exact file:line reference
+   - Type: HTTP_ROUTE | CLI_ARG | FILE_PARSE | IPC | PS_PARAM | SYSCALL | IOCTL | PLUGIN_API | FFI | ENV_VAR | CONFIG_FILE | REGISTRY
+   - What data enters: query params, body fields, CLI args, file contents, IPC message fields, environment values
+   - Authentication required: none | user | admin | system | depends_on_config
+   - Data format: JSON body? Form data? Raw bytes? String? Binary?
+   - Description: what does this entry point let the attacker do?
+   - Threat level: HIGH (direct code exec possibility) | MEDIUM (file/process manipulation) | LOW (information only)
 
-2. TRUST BOUNDARIES
-   Every point where data crosses from lower privilege to higher privilege:
-   - Untrusted network → application
-   - User → admin/superuser functions
+2. TRUST BOUNDARIES (every privilege crossing)
+   - Untrusted network → application process
+   - User context → admin/superuser operations  
    - Plugin/extension → host process
-   - Renderer → browser kernel
-   - Tenant A → tenant B
    - Config file → code execution
-   List file:line for each boundary crossing point.
+   - Child process → parent process
+   - File system → application (if application reads from attacker-writable locations)
+   - IPC message → handler
+   For each: exact file:line where the crossing happens, what privileges change.
 
-3. SINK INVENTORY  
-   Every dangerous operation found in the code. Group by category:
-   - Command/shell execution
-   - SQL/database queries
-   - Deserialization points
-   - File I/O (read, write, delete) with dynamic paths
-   - Memory operations (malloc, free, unsafe casts) — native code only
-   - HTTP clients (potential SSRF)
-   - Template engines / dynamic code evaluation
-   - Authentication/authorization checks
-   - Cryptographic operations (key storage, encryption)
-   For each: file:line, what makes it dangerous, what input could reach it.
+3. SINK INVENTORY (every dangerous operation, organized by category)
+   COMMAND EXECUTION:
+   - Process.Start(), PowerShell.Create().AddScript(), system(), exec(), popen()
+   - Shell command strings with dynamic parts
+   DESERIALIZATION:
+   - BinaryFormatter.Deserialize, JsonConvert.DeserializeObject with TypeNameHandling
+   - XmlSerializer with untrusted XML, YAML deserialization
+   - ScriptBlock.Create() with dynamic script text
+   FILE I/O:
+   - File.Read/Write with dynamic paths, Directory operations with user input
+   - Archive extraction (zip slip), temporary file races
+   DATABASE:
+   - Raw SQL queries with string concatenation/interpolation
+   - NoSQL injection (MongoDB $where, etc.)
+   NETWORK:
+   - HttpClient with dynamic URLs (SSRF), raw socket operations
+   - WebSocket/HTTP listeners accepting external connections
+   DYNAMIC CODE:
+   - Invoke-Expression, eval(), reflection-based invocation
+   - Template engines with user-controlled templates
+   AUTH/CRYPTO:
+   - Hardcoded secrets, weak random generation, missing signature verification
+   MEMORY (C/C++/unsafe Rust):
+   - malloc/free, memcpy, unsafe blocks, pointer arithmetic
+   For each: file:line, category, what input reaches it, what makes it dangerous.
 
-4. DATA FLOW OVERVIEW
-   How untrusted input moves through the system:
-   - Input source → validation/sanitization → processing → output/sink
-   - Note where sanitization EXISTS and where it's MISSING on each path
-   - Flag "no sanitization" paths explicitly
+4. DATA FLOW ANALYSIS (critical paths from entry to sink)
+   For the TOP 10 most dangerous flows:
+   - Source (entry point) → [validator/sanitizer?] → [intermediate processing] → Sink
+   - Mark each step: SANITIZED? YES/NO/WEAK
+   - Flag paths with "NO SANITIZATION" in bold — these are the PRIORITY audit targets
 
 5. ARCHITECTURE OVERVIEW
-   - Key components and how they relate
-   - Authentication/authorization mechanism
-   - Session management approach
-   - Plugin/extension system (if any)
-   - Inter-process communication (if any)
+   - Key components and their relationships
+   - Authentication mechanism: how are users/sessions managed?
+   - Authorization: role-based? claims-based? custom?
+   - Plugin/extension system: can third-party code run in-process?
+   - IPC: named pipes, sockets, shared memory, COM?
+   - Configuration: file-based? registry? environment? how is it loaded?
 
 OUTPUT AS VALID JSON with these keys:
 {
-  "entry_points": [{...}],
-  "trust_boundaries": [{...}],
-  "sinks": [{...}],
-  "data_flows": [{...}],
-  "architecture": {...},
-  "cve_catalog": [...],
-  "coverage_plan": [...]  // Ordered list of files/dirs to audit, prioritized by risk
+  "entry_points": [{"file": "...", "line": N, "type": "...", "data_enters": "...", "auth": "...", "threat_level": "..."}],
+  "trust_boundaries": [{"file": "...", "line": N, "description": "...", "privilege_change": "..."}],
+  "sinks": [{"file": "...", "line": N, "category": "...", "description": "...", "reachable_from": "entry point name"}],
+  "data_flows": [{"source": "...", "sanitizers": [...], "sink": "...", "sanitized": "YES|NO|WEAK"}],
+  "architecture": {"components": [...], "auth_mechanism": "...", "plugin_system": "...", "ipc": "..."},
+  "coverage_plan": ["ordered list of files/dirs to audit, most dangerous first"]
 }
 """
 
@@ -119,7 +135,8 @@ def run(
     taint_flows = static_analysis.get("_taint_flows", [])
 
     # Build CVE catalog
-    cve_catalog = _build_cve_catalog(primary, primary_lang, frameworks)
+    languages_fp = fingerprint.get("languages", {})
+    cve_catalog = _build_cve_catalog(primary, primary_lang, languages_fp, frameworks)
 
     # Build code context for the LLM threat model pass
     code_samples = _collect_threat_model_files(repo_path, file_inventory, sinks, primary)
@@ -189,10 +206,10 @@ Language: {primary_lang}
     return threat_model
 
 
-def _build_cve_catalog(primary: str, language: str, frameworks: list[str]) -> dict[str, Any]:
+def _build_cve_catalog(primary: str, language: str, languages: dict[str, int], frameworks: list[str]) -> dict[str, Any]:
     db = CVEDatabase()
     catalog: dict[str, list[dict]] = {}
-    keywords = _build_keywords(primary, language, frameworks)
+    keywords = _build_keywords(primary, language, languages, frameworks)
 
     for exploit_class, cwe_ids in EXPLOIT_CLASSES.items():
         results = db.search(
@@ -205,6 +222,10 @@ def _build_cve_catalog(primary: str, language: str, frameworks: list[str]) -> di
             results = db.search(query=" ".join(keywords[:4]), kev_only=True, limit=5)
         if results:
             catalog[exploit_class] = _format_cves(results)
+
+    # Product-specific searches for PowerShell/dotnet
+    if primary in ("powershell", "dotnet"):
+        _add_product_cves(db, catalog, primary, languages)
 
     # KEV catalog
     kev_all = db.search(query=" ".join(keywords[:4]), kev_only=True, limit=50)
@@ -247,13 +268,13 @@ def _build_cve_catalog(primary: str, language: str, frameworks: list[str]) -> di
     }
 
 
-def _build_keywords(primary: str, language: str, frameworks: list[str]) -> list[str]:
+def _build_keywords(primary: str, language: str, languages: dict[str, int], frameworks: list[str]) -> list[str]:
     k = [language]
     k.extend(frameworks)
     mapping = {
         "kernel": ["linux kernel", "kernel", "driver", "privilege escalation"],
-        "powershell": ["powershell", "automation", "scripting", "command execution"],
-        "dotnet": [".net", "csharp", "asp.net", "deserialization"],
+        "powershell": ["PowerShell", "Cmdlet", "System.Management.Automation", "PSCmdlet", "command injection", "code execution"],
+        "dotnet": [".NET", "C#", "deserialization", "BinaryFormatter", "XAML", "assembly load"],
         "web_app": ["web", "injection", "authentication", "csrf"],
         "ide_editor": ["code editor", "plugin", "extension", "file parsing"],
         "compiler": ["compiler", "parser", "code generation"],
@@ -264,7 +285,52 @@ def _build_keywords(primary: str, language: str, frameworks: list[str]) -> list[
         "container": ["container", "docker", "escape", "privilege"],
     }
     k.extend(mapping.get(primary, []))
-    return list(dict.fromkeys(k))[:6]
+
+    # Add secondary language if present
+    for lang_name, count in languages.items():
+        if count > 50 and lang_name != language:
+            k.append(lang_name)
+
+    return list(dict.fromkeys(k))[:8]
+
+
+def _add_product_cves(db, catalog, primary, languages):
+    product_queries = {
+        "powershell": [
+            "PowerShell command injection",
+            "PowerShell CVE",
+            "Microsoft PowerShell",
+            "System.Management.Automation",
+        ],
+        "dotnet": [
+            ".NET deserialization CVE",
+            "C# code execution",
+            "ASP.NET CVE",
+            "BinaryFormatter CVE",
+            "XAML injection",
+        ],
+    }
+    queries = product_queries.get(primary, [])
+    seen_ids = set()
+    for cat_cves in catalog.values():
+        for c in cat_cves:
+            seen_ids.add(c.get("cve_id", ""))
+
+    for q in queries:
+        results = db.search(query=q, kev_only=False, limit=10, min_epss=0.001)
+        for r in results:
+            rid = r.get("cve_id") or r.get("id", "")
+            if rid not in seen_ids:
+                catalog.setdefault("product_specific", []).append({
+                    "cve_id": rid,
+                    "description": (r.get("description") or "")[:300],
+                    "cvss_score": r.get("cvss_score"),
+                    "epss_score": r.get("epss_score"),
+                    "kev_member": r.get("kev_member"),
+                    "cwe_ids": r.get("cwe_ids"),
+                    "severity": r.get("severity"),
+                })
+                seen_ids.add(rid)
 
 
 def _format_cves(rows: list[dict]) -> list[dict]:
@@ -316,7 +382,7 @@ def _collect_threat_model_files(
         if fp.exists():
             candidates.append((1, fp))
 
-    samples = file_inventory.get("sample_files", [])
+    samples = file_inventory.get("all_files", file_inventory.get("sample_files", []))
     samples.sort(key=lambda s: -s.get("size", 0))
     for s in samples[:10]:
         fp = repo_path / s["path"]
@@ -379,28 +445,40 @@ def _build_coverage_plan(
 ) -> list[dict[str, Any]]:
     """Build prioritized file list for multi-pass audit coverage."""
     plan = []
-
-    # Priority 0: entry point files
     seen: set[str] = set()
-    for ep in entry_points[:20]:
+
+    TEST_DIRS = {"test", "tests", "spec", "fixtures", "mocks", "benchmarks", "perf"}
+    SKIP_EXTS = {".md", ".txt", ".rst", ".json", ".xml", ".yml", ".yaml", ".svg", ".png", ".jpg"}
+
+    def _skip_file(fname: str) -> bool:
+        parts = Path(fname).parts
+        # Skip if ANY part is a test directory (case-insensitive)
+        for p in parts:
+            if p.lower() in TEST_DIRS:
+                return True
+        ext = Path(fname).suffix.lower()
+        return ext in SKIP_EXTS
+
+    # Priority 0: entry point files (filter out test dirs)
+    for ep in entry_points[:30]:
         fname = ep.get("file", "")
-        if fname and fname not in seen:
+        if fname and fname not in seen and not _skip_file(fname):
             plan.append({"file": fname, "priority": 0, "reason": "entry_point"})
             seen.add(fname)
 
-    # Priority 1: hot sink files
+    # Priority 1: hot sink files (most dangerous first, exclude test dirs)
     sink_count: dict[str, int] = {}
     for s in sinks:
         sink_count[s["file"]] = sink_count.get(s["file"], 0) + 1
-    for fname in sorted(sink_count, key=lambda x: -sink_count[x])[:80]:
-        if fname not in seen:
+    for fname in sorted(sink_count, key=lambda x: -sink_count[x])[:150]:
+        if fname not in seen and not _skip_file(fname):
             plan.append({"file": fname, "priority": 1, "reason": f"sinks:{sink_count[fname]}"})
             seen.add(fname)
 
-    # Priority 2: all remaining code files
-    samples = file_inventory.get("sample_files", [])
+    # Priority 2: all remaining code files (non-test, non-config, sorted by size descending)
+    samples = file_inventory.get("all_files", file_inventory.get("sample_files", []))
     for s in samples:
-        if s["path"] not in seen:
+        if s["path"] not in seen and not _skip_file(s["path"]):
             plan.append({"file": s["path"], "priority": 2, "reason": "remaining"})
             seen.add(s["path"])
 
@@ -408,10 +486,19 @@ def _build_coverage_plan(
 
 
 def _fallback_threat_model(file_inventory: dict, sinks: list, taint_flows: list) -> dict[str, Any]:
+    fallback_sinks = []
+    for s in sinks[:50]:
+        fallback_sinks.append({
+            "file": s["file"],
+            "line": s.get("line", 0),
+            "category": s.get("category", ""),
+            "description": f"{s.get('sink_type', '')} — {s.get('matched_text', '')[:100]}",
+        })
+
     return {
         "entry_points": [],
         "trust_boundaries": [],
-        "sinks": [],
+        "sinks": fallback_sinks,
         "data_flows": [],
         "architecture": {"note": "Fallback — LLM threat model failed, using static analysis only"},
         "note": "LLM call failed. Proceeding with static analysis signals.",

@@ -39,9 +39,11 @@ CLASSIFICATION_TABLE = [
         "signals": {
             "extensions_contain": [".ps1", ".psm1", ".psd1"],
             "files_contain": ["Cmdlet", "PSCmdlet", "System.Management.Automation"],
+            "dirs_contain": ["src/System.Management.Automation", "Modules", "PowerShell"],
             "build_files": ["PowerShell.sln", ".csproj"],
+            "_dual_language": "C#",
         },
-        "refs": ["cli-tools.md", "dotnet.md", "powershell.md", "serialization.md", "generic-sinks.md", "exploit-patterns.md"],
+        "refs": ["cli-tools.md", "dotnet.md", "powershell.md", "serialization.md", "generic-sinks.md", "exploit-patterns.md", "supply-chain.md"],
     },
     {
         "name": "AI / ML Framework",
@@ -196,6 +198,10 @@ def _match_rule(fp: dict[str, Any], signals: dict[str, Any]) -> bool:
         if fp.get("primary_language") not in signals["primary_language_in"]:
             return False
 
+    if "_dual_language" in signals:
+        if fp.get("primary_language") != signals["_dual_language"]:
+            return False
+
     if "extensions_contain" in signals:
         langs = fp.get("languages", {})
         exts_present = set()
@@ -232,7 +238,14 @@ def _repo_dirs_match(repo_path: str, dirs: list[str]) -> bool:
                 repo_dirs.add(item.name.lower())
     except Exception:
         pass
-    return any(d.lower() in repo_dirs for d in dirs)
+    for d in dirs:
+        if "/" in d or "\\" in d:
+            full_path = p / d
+            if full_path.exists() and full_path.is_dir():
+                return True
+        elif d.lower() in repo_dirs:
+            return True
+    return False
 
 
 def _files_contain(repo_path: str, keywords: list[str]) -> bool:
@@ -282,11 +295,12 @@ def _build_result(fp: dict[str, Any], rule: dict[str, Any]) -> dict[str, Any]:
     primary = rule["primary"]
     secondary = []
 
-    if primary != "web_app" and any(
-        fw in str(fp.get("frameworks", [])).lower()
-        for fw in ["express", "fastapi", "flask", "django", "rails", "spring"]
-    ):
-        secondary.append("web_app")
+    if primary != "web_app":
+        fw_text = str(fp.get("frameworks", [])).lower()
+        web_fws = ["express", "fastapi", "flask", "django", "rails", "spring"]
+        matched_web = [fw for fw in web_fws if fw in fw_text]
+        if len(matched_web) >= 2:
+            secondary.append("web_app")
 
     return {
         "primary_class": primary,

@@ -207,7 +207,7 @@ def _collect_strategic_samples(
             candidates.append((1, fp))
 
     # Priority 2: sample files by size (large files likely important)
-    samples = file_inventory.get("sample_files", [])
+    samples = file_inventory.get("all_files", file_inventory.get("sample_files", []))
     samples.sort(key=lambda s: -s.get("size", 0))
     for s in samples[:20]:
         fp = repo_path / s["path"]

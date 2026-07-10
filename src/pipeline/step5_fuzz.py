@@ -1,11 +1,11 @@
-"""Step 5: N-pass clean-context fuzz audit.
+"""Step 5: N-pass exhaustive fuzz audit.
 
-Each pass starts with fresh context, picks 3-5 files from uncovered areas,
-receives the threat model + CVE catalog, and reports any plausible vulnerability.
-Coverage tracker ensures passes explore the full attack surface.
-Candidates are pooled to disk for later triage.
+Every file in the coverage plan is sent to the LLM, no exceptions.
+Passes are packed dynamically to fill the context window — larger files get
+fewer companions, smaller files get bundled together.
 
 This is recall-first. Noise is expected. Precision comes in Step 5b (triage).
+Time is not a constraint — the goal is finding every real vulnerability.
 """
 from __future__ import annotations
 
@@ -21,45 +21,115 @@ from src.utils.logger import get_logger
 
 logger = get_logger()
 
-PASSES_DEFAULT = 20
-FILES_PER_PASS = 4
+MAX_CODE_CHARS_PER_PASS = 60000
 
-FUZZ_PASS_PROMPT = """You are auditing source code for security vulnerabilities.
+FUZZ_PASS_PROMPT = """You are an elite offensive security researcher performing a whitebox code audit.
+Your target is the code below. Your mission: find every exploitable vulnerability in these files.
 
-RULES:
-- Be THOROUGH. Read every line of the provided files.
-- Report ANY plausible vulnerability, even if you're not 100% sure.
-- Do NOT self-censor. False positives in this pass are EXPECTED.
-- Every finding MUST cite exact file:line references from the provided code.
-- Trace the path from attacker-controlled input to dangerous sink.
-- Check if any validation/sanitization/auth check exists that would block the path.
-- If blocked, note it but still report — triage will verify.
+THINK LIKE AN ATTACKER. For each file, mentally walk through:
+  "If I control this input, what happens at runtime? Where does my data go?
+   What checks does it pass through? What can I overwrite, inject, or bypass?"
 
-FOR EACH CANDIDATE FINDING, output:
+COVER EVERY VULNERABILITY CLASS. Explicitly check each file for:
+  COMMAND INJECTION: Any shell/process execution with user-controlled parts.
+    - PowerShell::Create().AddScript(), Process.Start(), system(), exec(), popen()
+    - String interpolation into commands, argument injection, shell metacharacters
+  PATH TRAVERSAL / FILE MANIPULATION: User input in file paths.
+    - Path.Combine() with user data, File.Read*/Write*, Directory operations
+    - Symlink races (TOCTOU between check and use), zip-slip in archives
+  DESERIALIZATION: Any deserialization of untrusted data.
+    - BinaryFormatter, JSON.NET TypeNameHandling, XML serialization, YAML
+    - Check for type validation, SerializationBinder, SafeSerialization
+  CODE INJECTION: Dynamic code evaluation with user input.
+    - Invoke-Expression, ScriptBlock.Create(), AddScript(), eval()
+    - Template injection, expression language evaluation
+  AUTH BYPASS / PRIVILEGE ESCALATION: Missing or flawed access checks.
+    - Direct object references without ownership checks
+    - Role checks that can be bypassed, missing authorization on sensitive operations
+    - Token/session manipulation, JWT flaws, hardcoded credentials
+  RACE CONDITIONS: Shared mutable state accessed concurrently.
+    - Static fields, singletons, shared caches without locking
+    - File system TOCTOU, multi-threaded access to non-thread-safe resources
+  INFORMATION DISCLOSURE: Leaking sensitive data through error messages or outputs.
+    - Stack traces, internal paths, secrets in responses
+    - Timing side-channels, debug endpoints exposed
+  MEMORY / NATIVE ISSUES: For C/C++/Rust unsafe code.
+    - Buffer overflows, use-after-free, double-free, integer overflow
+    - Unsafe pointer arithmetic, missing bounds checks
+  CRYPTO WEAKNESSES: Insecure cryptographic usage.
+    - Hardcoded keys/IVs, weak algorithms (MD5, SHA1, DES, RC4)
+    - Missing authentication, predictable randomness, key leakage
+  LOGIC FLAWS: Application-specific logic that can be exploited.
+    - Integer overflow in calculations, negative values passed where positives expected
+    - Type confusion, unexpected null handling, state machine flaws
+
+HOW TO ANALYZE EACH FILE:
+1. Scan for dangerous sinks first (see catalog below) — mark every one
+2. For each sink, trace BACKWARDS: where does the data come from?
+3. Check if data passes through any validator, sanitizer, or access check
+4. If none: REPORT. If there is one: try to find a bypass.
+5. Consider INDIRECT data flows: can a different entry point influence this variable?
+6. Check error handling: does an exception expose the sink without the validator?
+7. Consider encoding tricks: Unicode normalization, null bytes, path separator confusion
+8. Check for TYPE CONFUSION: could a string become an object, or int become a path?
+
+FOR EACH FINDING YOU MUST:
+- QUOTE the exact vulnerable lines from the file
+- Explain step-by-step how attacker data reaches the sink
+- State what validation EXISTS (if any) and why it's insufficient
+- Describe what a working exploit would look like at runtime
+- Rate confidence based on how certain you are the path is exploitable
+  (0.9+ = I can see the exact exploit, 0.7 = likely exploitable but needs verification,
+   0.5 = suspicious pattern but path may be constrained, below 0.5 = worth noting)
+
+COMPARE AGAINST THE CVE CATALOG: For each finding, check if it resembles a known CVE
+pattern from the catalog. Reference the CVE ID if it does.
+
+OUTPUT FORMAT — valid JSON only:
 {
   "candidates": [
     {
-      "vulnerability_class": "e.g. Command injection via pipeline parameter",
+      "vulnerability_class": "specific class name with CWE reference",
       "component": "file:line — function name",
-      "entry_point": "how attacker reaches this",
-      "entry_point_type": "HTTP_POST|CLI_ARG|PS_PARAM|FILE_PARSE|IPC|SYSCALL|...",
-      "sink": "dangerous operation and file:line",
+      "entry_point": "exactly how attacker reaches this code",
+      "entry_point_type": "HTTP_POST|CLI_ARG|PS_PARAM|FILE_PARSE|IPC|SYSCALL|ENV_VAR|CONFIG_FILE",
+      "sink": "exact dangerous operation and file:line",
+      "source_reasoning": "DETAILED. Quote the actual lines. Show the missing validation. Explain the runtime exploit path. Why is this NOT a false positive? What makes the existing mitigations insufficient?",
+      "similar_cve": "CVE-XXXX-YYYYY if a known pattern matches, or null",
       "trace_hops": [
         {"hop": 1, "file": "...", "line": N, "function": "...",
-         "description": "...", "data_controlled": true/false, "mitigation": null/"..."}
+         "description": "what happens in this hop",
+         "data_controlled": true/false,
+         "mitigation": null/"what check exists and why it fails",
+         "code_snippet": "the actual vulnerable line(s)"}
       ],
-      "preconditions": ["what must be true"],
-      "expected_impact": "RCE|LPE|info_leak|auth_bypass|...",
+      "preconditions": ["exactly what must be true for exploitation"],
+      "expected_impact": "RCE|LPE|info_leak|auth_bypass|file_write|file_read|privilege_escalation|...",
       "confidence": 0.0-1.0,
-      "cwe_id": "CWE-XXXX",
+      "cwe_id": "CWE-XX",
       "requires_authentication": true/false
     }
   ],
-  "next_files_wanted": ["paths to files you want to see next pass"]
+  "next_files_wanted": ["specific file paths you want to see to verify or extend findings"],
+  "files_fully_analyzed": true/false
 }
 
-THE THREAT MODEL AND CVE CATALOG BELOW TELLS YOU WHAT TO HUNT FOR.
-READ EVERY LINE OF THE PROVIDED CODE. REPORT EVERYTHING SUSPICIOUS."""
+DO NOT hold back. DO NOT self-censor. DO NOT dismiss findings because "it might be handled elsewhere."
+If you see a dangerous pattern, REPORT IT. Triage happens later.
+Every false negative is WORSE than every false positive here.
+BE EXHAUSTIVE. Every single line of these files must be mentally traced for vulnerabilities."""
+
+FILES_FOLLOWUP_PROMPT = """You previously analyzed these files but marked them as incomplete.
+RE-ANALYZE with full attention. You must find every issue this time.
+Previous context is gone — this is a fresh pass. Be MORE thorough, not less.
+
+Look for:
+- Vulnerabilities you may have missed on first pass
+- Deeper traces: what happens AFTER the sink? Can you chain to higher impact?
+- Subtle bugs: off-by-one, integer overflow, Unicode issues, TOCTOU
+- Implicit trust: does this code assume data from other components is already validated?
+
+EVERY FILE MUST BE MARKED files_fully_analyzed: true THIS TIME."""
 
 
 def run(
@@ -67,20 +137,19 @@ def run(
     threat_model: dict[str, Any],
     checkpoint_dir: Path,
 ) -> list[dict[str, Any]]:
-    logger.info("Step 5: N-pass clean-context fuzz audit...")
+    logger.info("Step 5: N-pass exhaustive fuzz audit...")
 
     coverage_plan = threat_model.get("coverage_plan", [])
     if not coverage_plan:
         logger.warning("No coverage plan in threat model. Cannot fuzz.")
         return []
 
-    num_passes = _determine_pass_count(len(coverage_plan))
-
     progress = _load_progress(checkpoint_dir)
-    start_pass = progress.get("completed_passes", 0)
     all_candidates = list(progress.get("all_candidates", []))
-    covered_files = progress.get("covered_files", [])
+    covered_files: list[str] = progress.get("covered_files", [])
+    existing_followup = progress.get("files_needing_followup", [])
     next_files_wanted = progress.get("next_files_wanted", [])
+    pass_num = progress.get("completed_passes", 0)
 
     threat_text = _format_threat_for_prompt(threat_model)
     cve_text = threat_model.get("cve_catalog", {}).get("text", "")
@@ -90,58 +159,87 @@ def run(
 
     system = f"""{GUARD_PREAMBLE}
 
-You are a security vulnerability fuzzer. Your job: find bugs. Do not self-censor.
-Report everything suspicious. False positives are expected and OK.
+You are an elite offensive security researcher performing a whitebox audit.
+Find every vulnerability. Be exhaustive. Do not self-censor. False positives are expected.
 
-Target: {classification.get('display_name', '?')} ({classification.get('primary_class', '?')})
+TARGET: {classification.get('display_name', '?')}
+CLASS: {classification.get('primary_class', '?')}
+LANGUAGE: {classification.get('key_signals', {}).get('language', '?')}
+
+HUNTING GUIDANCE — Known exploit patterns for this target type:
 {cve_text}
 
+THREAT SURFACE MAP:
 {threat_text}
 
 {FUZZ_PASS_PROMPT}
 """
 
-    logger.info(f"  Fuzzing {len(coverage_plan)} files over {num_passes} passes (starting pass {start_pass + 1})")
+    total_files = len(coverage_plan)
+    covered_set = set(covered_files)
+    files_needing_followup: set[str] = set(existing_followup)
+    est_passes = _estimate_passes(coverage_plan, repo_path)
 
-    for pass_num in range(start_pass, num_passes):
+    logger.info(f"  Exhaustive mode: {total_files} files, ~{est_passes} passes estimated")
+    logger.info(f"  Already covered: {len(covered_files)}, resuming from pass {pass_num + 1}")
+
+    while len(covered_files) < total_files or files_needing_followup:
         pass_start = time.time()
+        pass_num += 1
 
-        # Pick files for this pass
-        batch = _pick_batch(coverage_plan, covered_files, next_files_wanted, pass_num, FILES_PER_PASS)
+        if files_needing_followup:
+            batch = _pick_followup_batch(coverage_plan, files_needing_followup, repo_path, MAX_CODE_CHARS_PER_PASS)
+            if batch:
+                files_needing_followup.difference_update(item["file"] for item in batch)
+                is_followup = True
+            else:
+                files_needing_followup.clear()
+                continue
+        else:
+            batch = _pick_budget_batch(coverage_plan, covered_set, next_files_wanted,
+                                        repo_path, pass_num, MAX_CODE_CHARS_PER_PASS)
+            is_followup = False
+
         if not batch:
-            logger.info(f"  All files covered. Done at pass {pass_num + 1}.")
-            break
+            if not files_needing_followup:
+                logger.info(f"  All {total_files} files covered. Done at pass {pass_num}.")
+                break
+            files_needing_followup.clear()
+            continue
 
         batch_files = [item["file"] for item in batch]
-        logger.info(f"  Pass {pass_num + 1}/{num_passes}: {len(batch_files)} files — "
-                    f"{batch_files[0]}, ... [{len(covered_files)}/{len(coverage_plan)} covered]")
+        pct = len(covered_files) / total_files * 100
+        label = "FOLLOWUP" if is_followup else f"{pct:.1f}%"
+        logger.info(f"  Pass {pass_num} [{label}]: {len(batch_files)} files, "
+                    f"{total_files - len(covered_files)} remaining — "
+                    f"{batch_files[0]}, ...")
 
-        # Read files
         code_samples = {}
         for item in batch:
             fp = repo_path / item["file"]
             if fp.exists():
                 try:
                     content = fp.read_text(errors="replace")
-                    if len(content) > 10000:
-                        content = content[:10000] + "\n// ... [truncated]"
                     code_samples[f"{item['file']} (priority:{item['priority']} — {item['reason']})"] = content
                 except Exception:
                     continue
-            covered_files.append(item["file"])
+            if not is_followup:
+                covered_set.add(item["file"])
 
         if not code_samples:
             continue
 
-        # Build prompt with code
         code_text = ""
         for path, content in code_samples.items():
             code_text += f"\n--- {path} ---\n{content}\n"
+        if len(code_text) > MAX_CODE_CHARS_PER_PASS:
+            code_text = code_text[:MAX_CODE_CHARS_PER_PASS] + "\n// ... [truncated at context limit]"
 
-        user = f"AUDIT THESE FILES. Report every plausible vulnerability. Output valid JSON.\n\n{code_text}"
+        audit_prompt = FILES_FOLLOWUP_PROMPT if is_followup else "AUDIT THESE FILES EXHAUSTIVELY."
+        user = f"{audit_prompt} Report every plausible vulnerability. Output valid JSON.\n\n{code_text}"
 
         try:
-            result = client.chat_json(system + f"\n\nAudit pass {pass_num + 1}/{num_passes}.", user, max_tokens=3072, temperature=0.4)
+            result = client.chat_json(system, user, max_tokens=4096, temperature=0.4)
         except Exception as e:
             logger.warning(f"    LLM call failed: {e}")
             result = {}
@@ -149,33 +247,37 @@ Target: {classification.get('display_name', '?')} ({classification.get('primary_
         candidates = result.get("candidates", []) if result else []
         next_files_wanted = result.get("next_files_wanted", [])
 
+        # Track files needing follow-up (flagged as not fully analyzed)
+        if not is_followup and not result.get("files_fully_analyzed", True):
+            for item in batch:
+                files_needing_followup.add(item["file"])
+
         for c in candidates:
-            c["_pass"] = pass_num + 1
+            c["_pass"] = pass_num
             c["_audited_files"] = batch_files
         all_candidates.extend(candidates)
 
         elapsed = time.time() - pass_start
-        logger.info(f"    {len(candidates)} candidates found ({elapsed:.1f}s)")
+        covered_files = sorted(covered_set)
+        logger.info(f"    {len(candidates)} candidates found ({elapsed:.1f}s) "
+                    f"[{len(all_candidates)} total]")
 
-        # Save checkpoint after every pass
         progress = {
-            "completed_passes": pass_num + 1,
-            "total_passes": num_passes,
+            "completed_passes": pass_num,
+            "total_passes": est_passes,
             "all_candidates": all_candidates,
             "covered_files": covered_files,
             "next_files_wanted": next_files_wanted,
-            "score": _coverage_score(covered_files, coverage_plan),
+            "score": len(covered_files) / total_files if total_files else 0,
+            "files_needing_followup": list(files_needing_followup),
         }
         _save_progress(checkpoint_dir, progress)
 
-        # Early termination: if 3+ candidates found after pass 5, consider done
-        if pass_num >= 4 and len(all_candidates) >= 3:
-            logger.info(f"    {len(all_candidates)} candidates found. Continuing for completeness...")
+    final_covered = len(covered_files)
+    logger.info(f"  Fuzz complete: {final_covered}/{total_files} files "
+                f"({final_covered / total_files * 100:.1f}%), "
+                f"{len(all_candidates)} candidates over {pass_num} passes")
 
-    logger.info(f"  Fuzz complete: {len(all_candidates)} candidates from {len(covered_files)} files "
-                f"({_coverage_score(covered_files, coverage_plan):.0%} coverage)")
-
-    # Strip internal fields
     clean = []
     for c in all_candidates:
         clean_c = {k: v for k, v in c.items() if not k.startswith("_")}
@@ -186,29 +288,71 @@ Target: {classification.get('display_name', '?')} ({classification.get('primary_
     return clean
 
 
-def _pick_batch(coverage_plan, covered_files, next_files_wanted, pass_num, batch_size):
+def _pick_budget_batch(coverage_plan, covered_set, next_files_wanted,
+                        repo_path, pass_num, max_chars):
+    """Greedily pack uncovered files into the budget, priority-ordered."""
     batch = []
+    char_budget = max_chars
 
-    # If LLM requested specific files, prioritize them
-    if next_files_wanted and pass_num > 0:
-        for wanted in next_files_wanted[:batch_size]:
+    # If LLM requested specific files, try those first
+    if next_files_wanted and pass_num > 1:
+        for wanted in next_files_wanted:
             for item in coverage_plan:
-                if item["file"] not in covered_files and wanted in item["file"]:
-                    batch.append(item)
-                    if len(batch) >= batch_size:
-                        return batch
+                if item["file"] not in covered_set and wanted in item["file"]:
+                    fp = repo_path / item["file"]
+                    size = fp.stat().st_size if fp.exists() else 0
+                    if size <= char_budget:
+                        batch.append(item)
+                        char_budget -= size
+                        if char_budget < 500:
+                            return batch
 
-    # Otherwise pick from uncovered files, prioritizing priority order
+    # Fill remaining budget with uncovered files, priority order
     for priority in range(3):
-        if len(batch) >= batch_size:
+        if char_budget < 200:
             break
         for item in coverage_plan:
-            if item["file"] not in covered_files and item["priority"] == priority:
+            if item["file"] in covered_set:
+                continue
+            if item["priority"] != priority:
+                continue
+            fp = repo_path / item["file"]
+            if not fp.exists():
+                continue
+            size = fp.stat().st_size
+            if size <= char_budget or len(batch) == 0:
                 batch.append(item)
-                if len(batch) >= batch_size:
-                    break
+                char_budget -= size
+            if char_budget < 500:
+                break
 
-    return batch[:batch_size]
+    return batch
+
+
+def _pick_followup_batch(coverage_plan, files_needing_followup, repo_path, max_chars):
+    """Pick files that were flagged as not fully analyzed for a re-audit."""
+    batch = []
+    char_budget = max_chars
+    for item in coverage_plan:
+        if item["file"] in files_needing_followup:
+            fp = repo_path / item["file"]
+            if fp.exists():
+                size = fp.stat().st_size
+                if size <= char_budget or len(batch) == 0:
+                    batch.append(item)
+                    char_budget -= size
+                if char_budget < 500:
+                    break
+    return batch
+
+
+def _estimate_passes(coverage_plan, repo_path) -> int:
+    total_chars = 0
+    for item in coverage_plan:
+        fp = repo_path / item.get("file", "")
+        if fp.exists():
+            total_chars += fp.stat().st_size
+    return max(1, total_chars // MAX_CODE_CHARS_PER_PASS + 1)
 
 
 def _format_threat_for_prompt(threat_model: dict) -> str:
@@ -232,19 +376,6 @@ def _format_threat_for_prompt(threat_model: dict) -> str:
             parts.append(f"  {b.get('description','')} @ {b.get('file','')}:{b.get('line','')}")
 
     return "\n".join(parts) if parts else "Threat model details not available."
-
-
-def _determine_pass_count(plan_size: int) -> int:
-    if plan_size <= 50: return min(plan_size // 2 + 2, 15)
-    if plan_size <= 200: return PASSES_DEFAULT
-    if plan_size <= 500: return 30
-    if plan_size <= 2000: return 50
-    return 80
-
-
-def _coverage_score(covered, plan) -> float:
-    if not plan: return 0.0
-    return len(covered) / len(plan)
 
 
 def _save_progress(checkpoint_dir: Path, progress: dict):

@@ -73,6 +73,11 @@ FRAMEWORK_SIGNALS = {
     "asp.net": "ASP.NET (C#)",
 }
 
+MANIFEST_EXTS = {
+    ".json", ".xml", ".yaml", ".yml", ".toml", ".cfg", ".ini",
+    ".csproj", ".fsproj", ".vbproj", ".sln", ".props", ".targets",
+}
+
 
 def run(repo_path: Path) -> dict[str, Any]:
     logger.info("Step 0: Fingerprinting repository...")
@@ -100,13 +105,12 @@ def run(repo_path: Path) -> dict[str, Any]:
 
         try:
             with open(f, encoding="utf-8", errors="replace") as fh:
-                content = fh.read(4096)
+                content = fh.read(8192)
                 total_lines += content.count("\n")
-                for sig, framework in FRAMEWORK_SIGNALS.items():
-                    if sig in content.lower():
-                        frameworks.add(framework)
         except Exception:
             continue
+
+    _detect_frameworks(repo_path, frameworks)
 
     architecture = _infer_architecture(repo_path, languages)
 
@@ -132,6 +136,29 @@ def run(repo_path: Path) -> dict[str, Any]:
     logger.info(f"  Frameworks: {', '.join(frameworks) if frameworks else 'none detected'}")
 
     return result
+
+
+def _detect_frameworks(repo_path: Path, frameworks: set[str]):
+    """Only scan manifest/config files for framework signals, not every source file."""
+    manifest_files = _find_manifest_files(repo_path)
+    for f in manifest_files:
+        try:
+            content = f.read_text(errors="replace")[:16384].lower()
+            for sig, framework in FRAMEWORK_SIGNALS.items():
+                if sig in content and framework not in frameworks:
+                    frameworks.add(framework)
+        except Exception:
+            continue
+
+
+def _find_manifest_files(repo_path: Path) -> list[Path]:
+    manifest = []
+    for f in repo_path.rglob("*"):
+        if f.is_file() and (f.name in BUILD_SIGNALS or f.suffix.lower() in MANIFEST_EXTS):
+            manifest.append(f)
+        if len(manifest) >= 200:
+            break
+    return manifest
 
 
 def _infer_architecture(repo_path: Path, languages: Counter) -> str:

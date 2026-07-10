@@ -203,8 +203,9 @@ def _pass_gate(gate: str, trace: dict, hyp: dict) -> bool:
 
 
 def _pass_three_questions(trace: dict, hyp: dict) -> bool:
-    if hyp.get("requires_authentication", True) and not trace.get("bypass_authentication", False):
-        return False
+    requires_auth = hyp.get("requires_authentication", False)
+    if requires_auth and not trace.get("bypass_authentication", False):
+        return True
     entry = str(hyp.get("entry_point_type", "")).upper()
     if entry in ("ENV_VAR", "CONFIG", "CLASSPATH", "SYSTEM_PROPERTY"):
         return False

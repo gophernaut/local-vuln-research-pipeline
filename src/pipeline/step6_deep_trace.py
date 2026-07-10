@@ -87,7 +87,7 @@ def run(
             full_prompt = f"{user}\n\n=== Source Code ===\n{_assemble_code(loaded_files, code_bundle)}"
 
             try:
-                result = client.chat_json(system, full_prompt, max_tokens=3072, temperature=0.3)
+                result = client.chat_json(system, full_prompt, max_tokens=4096, temperature=0.3)
             except Exception as e:
                 logger.warning(f"    Trace error: {e}")
                 result = {"error": str(e), "reachable": False, "exploitable": False}
@@ -103,6 +103,8 @@ def run(
                 trace_result["hypothesis_index"] = i
                 trace_result["hypothesis_class"] = hyp_class
                 trace_result["hypothesis_confidence"] = hyp.get("confidence")
+                trace_result["entry_point_type"] = hyp.get("entry_point_type", "")
+                trace_result["requires_authentication"] = hyp.get("requires_authentication", False)
 
             # Save checkpoint after each iteration
             if checkpoint_dir:
@@ -208,54 +210,72 @@ def _find_initial_files(
     repo_path: Path, hyp: dict[str, Any], static_analysis: dict[str, Any]
 ) -> list[Path]:
     files: set[Path] = set()
+    loaded_names: set[str] = set()
 
+    def _try_add(fp: Path):
+        if fp.exists() and fp.is_file() and not _skip(fp):
+            rel = str(fp.relative_to(repo_path))
+            if rel not in loaded_names:
+                files.add(fp)
+                loaded_names.add(rel)
+
+    # PRIORITY 1: Exact file references from the hypothesis
     for field in ["component", "entry_point", "sink"]:
         val = str(hyp.get(field, ""))
-        for part in val.replace(":", "/").replace("\\", "/").split("/"):
-            part = part.strip().rstrip(".)]}>")
-            if len(part) > 2:
-                for fp in repo_path.rglob(f"*{part}*"):
-                    if fp.is_file() and not _skip(fp):
-                        files.add(fp)
+        for part in val.split():
+            part = part.strip(".,;:()[]{}'\"")
+            if "." in part and len(part) > 3:
+                for fp in repo_path.rglob(part):
+                    _try_add(fp)
+                for fp in repo_path.rglob(f"**/{part}"):
+                    _try_add(fp)
 
-    for hit in static_analysis.get("semgrep_findings", []):
-        files.add(repo_path / hit["file"])
+    # PRIORITY 2: Files referenced in trace hops
+    for hop in hyp.get("trace_hops", []):
+        fname = hop.get("file", "")
+        if fname:
+            for fp in repo_path.rglob(fname):
+                _try_add(fp)
+            for fp in repo_path.rglob(f"**/{Path(fname).name}"):
+                _try_add(fp)
 
-    for sink in static_analysis.get("_sink_matches", []):
-        files.add(repo_path / sink["file"])
+    # PRIORITY 3: Files containing the component name
+    comp = hyp.get("component", "")
+    for part in comp.replace(":", "/").replace("\\", "/").split("/"):
+        part = part.strip().rstrip(".)]}>")
+        name_part = Path(part).name if "/" in part or "\\" in part else part
+        if len(name_part) > 3 and name_part not in loaded_names:
+            for fp in repo_path.rglob(f"*{name_part}*"):
+                _try_add(fp)
 
-    for flow in static_analysis.get("_taint_flows", []):
-        sf, df = flow.get("source_file", ""), flow.get("sink_file", "")
-        if sf: files.add(repo_path / sf)
-        if df: files.add(repo_path / df)
+    # PRIORITY 4: Top sink files from static analysis
+    sink_count: dict[str, int] = {}
+    for s in static_analysis.get("_sink_matches", []):
+        sink_count[s["file"]] = sink_count.get(s["file"], 0) + 1
+    for fname in sorted(sink_count, key=lambda x: -sink_count[x])[:10]:
+        _try_add(repo_path / fname)
 
-    for sample in static_analysis.get("file_inventory", {}).get("sample_files", [])[:15]:
-        files.add(repo_path / sample["path"])
-
-    entry_names = ["main.c", "main.cpp", "main.go", "main.rs", "Program.cs",
-                   "Program.java", "index.js", "app.py", "manage.py",
-                   "setup.py", "main.ps1", "__init__.py", "main.cmake"]
+    # PRIORITY 5: Entry point files
+    entry_names = ["Program.cs", "main.c", "main.cpp", "main.go", "main.rs",
+                   "main.ps1", "index.js", "app.py"]
     for name in entry_names:
         for fp in repo_path.rglob(name):
-            if fp.is_file() and not _skip(fp):
-                files.add(fp)
+            _try_add(fp)
 
-    return [f for f in files if f.exists()][:25]
+    return list(files)[:30]
 
 
 def _read_files(paths: list[Path], repo_root: Path, loaded: set[str]) -> dict[str, str]:
     code_files: dict[str, str] = {}
     total = 0
     for f in paths:
-        if total > 150000:
+        if total > 200000:
             break
         rel = str(f.relative_to(repo_root))
         if rel in loaded:
             continue
         try:
             content = f.read_text(errors="replace")
-            if len(content) > 12000:
-                content = content[:12000] + "\n// ... [truncated]"
             code_files[rel] = content
             loaded.add(rel)
             total += len(content)

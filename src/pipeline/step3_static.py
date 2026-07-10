@@ -98,7 +98,7 @@ def run(repo_path: Path) -> dict[str, Any]:
 def _build_file_inventory(repo_path: Path) -> dict[str, Any]:
     ext_count: dict[str, int] = {}
     total = 0
-    top_files: list[dict[str, Any]] = []
+    all_files: list[dict[str, Any]] = []
 
     for ext in UNIVERSAL_ENTRY_EXTENSIONS:
         for f in repo_path.rglob(f"*{ext}"):
@@ -106,22 +106,23 @@ def _build_file_inventory(repo_path: Path) -> dict[str, Any]:
                 continue
             ext_count[ext] = ext_count.get(ext, 0) + 1
             total += 1
-            if len(top_files) < 100:
-                top_files.append({
-                    "path": str(f.relative_to(repo_path)),
-                    "size": f.stat().st_size,
-                    "language": UNIVERSAL_ENTRY_EXTENSIONS.get(ext, str(ext)),
-                })
+            all_files.append({
+                "path": str(f.relative_to(repo_path)),
+                "size": f.stat().st_size,
+                "language": UNIVERSAL_ENTRY_EXTENSIONS.get(ext, str(ext)),
+            })
 
     languages = {}
     for ext, count in ext_count.items():
         lang = UNIVERSAL_ENTRY_EXTENSIONS.get(ext, ext)
         languages[lang] = languages.get(lang, 0) + count
 
+    all_files.sort(key=lambda f: -f["size"])
+
     return {
         "total_files": total,
         "languages": dict(sorted(languages.items(), key=lambda x: -x[1])),
-        "sample_files": top_files[:50],
+        "all_files": all_files,
     }
 
 

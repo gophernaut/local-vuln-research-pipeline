@@ -320,6 +320,8 @@ class Orchestrator:
                 "confidence": v.get("adjusted_confidence", 0),
                 "priority_score": v.get("adjusted_confidence", 0),
                 "cwe_id": v.get("cwe_id", ""),
+                "requires_authentication": v.get("requires_authentication", False),
+                "source_reasoning": v.get("source_reasoning", ""),
             })
 
         sa_full = {**sa, "_taint_flows": taint, "_sink_matches": sinks}
@@ -338,6 +340,10 @@ class Orchestrator:
                 "expected_impact": v.get("expected_impact", ""),
                 "entry_point": v.get("entry_point", ""),
                 "entry_point_type": v.get("entry_point_type", ""),
+                "requires_authentication": v.get("requires_authentication", False),
+                "preconditions": v.get("preconditions", []),
+                "source_reasoning": v.get("source_reasoning", ""),
+                "cwe_id": v.get("cwe_id", ""),
             })
         from src.pipeline.step7_validate import run
         return run(traces, hyps)

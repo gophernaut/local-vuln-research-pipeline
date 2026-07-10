@@ -20,47 +20,79 @@ from src.utils.logger import get_logger
 
 logger = get_logger()
 
-TRIAGE_PROMPT = """You are a skeptical security reviewer verifying candidate vulnerability findings.
+TRIAGE_PROMPT = """You are a skeptical vulnerability verifier. Your default position: DISTRUST every claim.
+The fuzzer that found these is known to hallucinate. Your job is to determine what's REAL.
 
-Your job: TRUST NOTHING. Verify everything against the actual source code.
+VERIFICATION METHOD (apply to EVERY candidate):
 
-FOR EACH CANDIDATE:
-1. Re-read the referenced file. Does the code REALLY say what the finding claims?
-2. Is the claimed trace path REAL? Can you follow each hop from entry to sink?
-3. Check for mitigations the fuzzer may have missed:
-   - Input validation/sanitization
-   - Parameterized queries
-   - Auth/access checks
-   - Bounds checking
-   - Encoding/escaping
-   - Error handling that prevents exploit
-4. If a mitigation exists that blocks the path → DISCARD with explanation
-5. If the code is missing or the file:line is wrong → DISCARD
-6. If the path is real and unmitigated → KEEP, rate severity honestly
+STEP 1 — READ THE ACTUAL CODE
+  Open the referenced file at the cited line. Read the surrounding function.
+  Does the code actually exist? Does it do what the candidate claims?
+  If the file:line is wrong, or the code is different from the claim → DISCARD.
+
+STEP 2 — TRACE THE DATA FLOW YOURSELF
+  Do not trust the trace hops. Follow the data yourself.
+  Start from the claimed entry point. Follow every assignment, every function call.
+  Do you end up at the claimed sink? Is the path continuous?
+  If the trace has gaps, imaginary functions, or jumps → DISCARD.
+
+STEP 3 — CHECK EVERY MITIGATION
+  Between entry and sink, look for:
+  - Input validation (whitelists, regex, type checks, length checks)
+  - Sanitization (encoding, escaping, stripping, normalization)
+  - Access control (auth checks, role verification, ownership checks)
+  - Parameterization (prepared statements, safe APIs that prevent injection)
+  - Error handling (try/catch that prevents the exploit path)
+  - Bounds checking (array length checks, size validation)
+  - Canonicalization (Path.GetFullPath, realpath, URI normalization)
+  If ANY of these effectively blocks the path → DISCARD with explanation.
+
+STEP 4 — ASSESS EXPLOITABILITY HONESTLY
+  Even if the path is real, ask:
+  - Can an EXTERNAL attacker trigger this? Or does it require local access?
+  - Is the attacker's input COMPLETELY controlled, or partially constrained?
+  - What preconditions must the attacker satisfy? Are they realistic?
+  - What is the ACTUAL impact? Don't inflate — a file read is not always RCE.
+  - Does exploitation require a race condition with a very narrow window?
+  - Can the vulnerability be reached through NORMAL application usage?
+  Be honest. LOW severity is better than an inflated MEDIUM that gets ignored.
+
+STEP 5 — PROVIDE EVIDENCE
+  For KEPT findings, you MUST include:
+  - The exact vulnerable lines quoted from the source
+  - Your independent trace from entry to sink
+  - Why each mitigation you found is insufficient
+  - A concrete scenario showing how exploitation works at runtime
+  - What a fix would look like (e.g., "validate with regex X", "use Parameterized API Y")
 
 OUTPUT valid JSON:
 {
   "verified": [
     {
-      "candidate_index": N (matches input array index),
-      "kept": true/false,
-      "reason": "why kept or why discarded",
+      "candidate_index": 0,
+      "kept": true,
+      "reason": "DETAILED reason for decision — cite code, explain trace, discuss mitigations",
       "adjusted_confidence": 0.0-1.0,
       "severity": "CRITICAL|HIGH|MEDIUM|LOW|INFO",
       "is_exploitable_by_external_attacker": true/false,
       "requires_authentication": true/false,
       "vulnerability_class": "confirmed class name",
-      "entry_point": "confirmed entry point",
-      "sink": "confirmed sink file:line",
-      "confirmed_trace": [array of verified hops],
-      "notes": "any additional context"
+      "entry_point": "confirmed entry file:line and how data enters",
+      "sink": "confirmed sink file:line and what dangerous operation",
+      "source_reasoning": "EXACT code evidence. Quote vulnerable lines. Show YOUR independent trace. Explain why mitigations fail. Describe exploitation scenario. Suggest fix.",
+      "confirmed_trace": [
+        {"hop": 1, "file": "...", "line": N, "function": "...",
+         "description": "...", "code_snippet": "..."}
+      ],
+      "notes": "any additional context about reliability, prerequisites, CVSS guess"
     }
   ],
   "summary": {
     "total_candidates": N,
     "kept": N,
     "discarded": N,
-    "top_finding_severity": "CRITICAL|HIGH|MEDIUM|LOW|NONE"
+    "top_finding_severity": "CRITICAL|HIGH|MEDIUM|LOW|NONE",
+    "most_confident_kept_reason": "brief description of strongest finding"
   }
 }"""
 
@@ -119,7 +151,8 @@ def run(
                     fp = repo_path / fname
                     if fp.exists():
                         try:
-                            code_files[fname] = fp.read_text(errors="replace")[:8000]
+                            content = fp.read_text(errors="replace")
+                            code_files[fname] = content
                         except Exception:
                             continue
 
@@ -127,13 +160,17 @@ def run(
         for fname, content in code_files.items():
             code_text += f"\n--- {fname} ---\n{content}\n"
 
+        max_code = 90000
+        if len(code_text) > max_code:
+            code_text = code_text[:max_code] + "\n// ... [truncated at context limit]"
+
         user = (
             f"VERIFY these {len(batch)} candidate findings against the source code below.\n\n"
-            f"{candidates_text}\n\n=== SOURCE CODE ===\n{code_text[:60000]}"
+            f"{candidates_text}\n\n=== SOURCE CODE ===\n{code_text}"
         )
 
         try:
-            result = client.chat_json(system, user, max_tokens=3072, temperature=0.2)
+            result = client.chat_json(system, user, max_tokens=4096, temperature=0.2)
         except Exception as e:
             logger.warning(f"    Triage batch failed: {e}")
             continue

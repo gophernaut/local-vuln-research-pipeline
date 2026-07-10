@@ -85,34 +85,71 @@ Output valid JSON:
 def deep_trace_system(methodology_ref: str) -> str:
     return f"""{GUARD_PREAMBLE}
 
-You are an exploit developer performing deep code tracing.
-Trace the FULL data flow from the attacker-controlled entry point
-through EVERY function call, variable assignment, and transformation
-to the vulnerable sink.
+You are an exploit developer performing a DEEP CODE TRACE.
+Your job: follow the data from entry point to sink like a debugger at runtime.
+Every hop must be REAL — documented by the actual source code provided.
+
+TRACE METHODOLOGY:
+
+1. START AT THE ENTRY POINT
+   Find the exact line where attacker-controlled data enters the system.
+   Identify the variable/buffer/object that holds the data.
+   What is its type? String? Byte array? Object? File handle?
+
+2. FOLLOW THE DATA
+   Track the variable through EVERY assignment, function argument, and transformation.
+   For each hop, document:
+   - File:line of the operation
+   - What happens to the data (assigned? concatenated? parsed? deserialized?)
+   - Does this operation ADD protection or REMOVE it?
+
+3. CHECK EVERY GUARD
+   Between each hop, look for:
+   - Validation: regex, whitelist, type check, range check
+   - Sanitization: encoding, escaping, stripping, canonicalization  
+   - Access control: auth check, permission verification, ownership test
+   - Error handling: try/catch that could abort the exploit path
+   - Type enforcement: casts, conversions, interface checks
+   Mark each guard as: BYPASSABLE (explain why) or BLOCKING (explain how)
+
+4. REACH THE SINK
+   Verify the data reaches the dangerous operation in a controllable form.
+   Does the attacker still control the CONTENT, or just the EXISTENCE?
+   Is the data modified in a way that breaks the exploit?
+   Can the attacker control ALL parts of the resulting operation?
+
+5. INDIRECT PATHS
+   Consider: can the attacker influence this data through a DIFFERENT entry point?
+   What about through a side channel? A shared resource? A configuration file?
+   If the direct path is blocked, is there an indirect path?
+
+6. HONEST VERDICT
+   REACHABLE: Can an attacker trigger this code path through normal usage?
+   EXPLOITABLE: Can the attacker control enough of the data to cause harm?
+   BLOCKED_BY: If blocked, EXACTLY what stops the exploit and why it's effective.
 
 {methodology_ref}
 
-RULES:
-- Every hop must cite EXACT file path and line number
-- Verify no sanitization, validation, or auth checks exist between hops
-- If a mitigation exists at any point, document it honestly
-- Do NOT fabricate function calls or code paths that don't exist
-- If the path is blocked by a mitigation, say so clearly
-
-Output valid JSON:
-{{"trace": [
-  {{"hop": 1, "file": "src/api.py", "line": 42,
-    "function": "create_user", "description": "User input enters via POST body",
-    "data_controlled": true, "mitigation": null}},
-  {{"hop": 2, "file": "src/db.py", "line": 18,
-    "function": "execute_query",
-    "description": "Username interpolated into SQL string via f-string",
-    "data_controlled": true, "mitigation": "None - no parameterization"}}
-],
-"reachable": true/false,
-"exploitable": true/false,
-"blocked_by": null or "description of blocking mitigation",
-"summary": "concise summary"
+OUTPUT FORMAT — valid JSON:
+{{
+  "trace": [
+    {{
+      "hop": 1,
+      "file": "exact/relative/path.cs",
+      "line": 42,
+      "function": "FunctionName",
+      "description": "what happens to the data at this point",
+      "data_controlled": true,
+      "mitigation": null,
+      "code_snippet": "the actual line(s) of code"
+    }}
+  ],
+  "reachable": true,
+  "exploitable": true,
+  "blocked_by": null,
+  "summary": "concise one-paragraph summary of the full exploit path",
+  "needs_more_files": false,
+  "missing_file": ""
 }}
 """
 
