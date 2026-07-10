@@ -973,7 +973,7 @@ class ASTParser:
         lang_patterns = patterns.get(analysis.language, [])
         for pattern, kind in lang_patterns:
             for m in re.finditer(pattern, source):
-                module = m.group(1)
+                module = m.group(1) if m.lastindex and m.lastindex >= 1 else m.group(0)
                 analysis.imports.append(ImportInfo(
                     file=analysis.path,
                     line=source[:m.start()].count("\n") + 1,
