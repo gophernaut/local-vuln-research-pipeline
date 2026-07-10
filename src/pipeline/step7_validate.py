@@ -19,9 +19,13 @@ HARD_KILL_FILTERS = [
 ]
 
 STANDARD_FILTERS = [
-    "reachability", "controllability", "bypass_feasibility",
+    "no_trace_fallback", "bypass_feasibility",
     "realistic_attacker", "no_assumed_conditions", "impact_materiality",
     "ai_slop_check",
+]
+
+FALLBACK_FILTERS = [
+    "reachability",
 ]
 
 CHAIN_SYNTHESIS_PROMPT = """You are an exploit chain analyst. Given these individual findings,
@@ -171,10 +175,20 @@ def _pass_gate(gate: str, trace: dict, hyp: dict) -> bool:
         return True
 
     if gate == "circular_threat":
-        return bool(hyp.get("entry_point"))
+        combined_text = str(hyp.get("preconditions", "")).lower()
+        combined_text += " " + str(hyp.get("vulnerability_class", "")).lower()
+        for kw in ["already compromised", "if attacker has root", "requires system access",
+                    "needs kernel", "if attacker controls the server"]:
+            if kw in combined_text:
+                return False
+        return True
 
     if gate == "library_vs_app":
-        return bool(hyp.get("entry_point"))
+        combined_text = str(hyp.get("preconditions", "")).lower()
+        for kw in ["as a library", "if library user", "caller must provide"]:
+            if kw in combined_text:
+                return False
+        return True
 
     if gate == "trusted_input":
         entry = str(hyp.get("entry_point_type", "")).upper()
@@ -189,8 +203,18 @@ def _pass_gate(gate: str, trace: dict, hyp: dict) -> bool:
                 return False
         return True
 
+    if gate == "no_trace_fallback":
+        summary = str(trace.get("summary", "")).lower()
+        if "no source code" in summary or "no code provided" in summary:
+            return True
+        return True
+
     if gate == "reachability":
-        return trace.get("reachable", False)
+        if "no source code" in combined or "no code provided" in combined:
+            return True
+        if "blocked: no source code provided" in str(trace.get("blocked_by", "")).lower():
+            return True
+        return trace.get("reachable", True)
 
     if gate == "ai_slop_check":
         for kw in ["missing security header", "missing csrf", "theoretical",

@@ -233,34 +233,40 @@ def _find_initial_files(
                 files.add(fp)
                 loaded_names.add(rel)
 
+    def _clean_filename(part: str) -> str:
+        part = part.split("—")[0]
+        for sep in [" - ", " (", " ["]:
+            if sep in part:
+                part = part[:part.index(sep)]
+        if ":" in part:
+            before = part.rsplit(":", 1)[0]
+            if Path(before).suffix:
+                part = before
+        return part.strip()
+
     # PRIORITY 1: Exact file references from the hypothesis
     for field in ["component", "entry_point", "sink"]:
         val = str(hyp.get(field, ""))
-        for part in val.split():
-            part = part.strip(".,;:()[]{}'\"")
-            if "." in part and len(part) > 3:
-                name_only = Path(part).name
-                try:
-                    for fp in _safe_rglob(repo_path, name_only):
+        clean = _clean_filename(val)
+        if clean:
+            name_only = Path(clean).name
+            if "." in name_only and len(name_only) > 3:
+                for fp in _safe_rglob(repo_path, name_only):
+                    _try_add(fp)
+                if "/" in clean or "\\" in clean:
+                    for fp in _safe_rglob(repo_path, f"**/{name_only}"):
                         _try_add(fp)
-                    if "/" in part or "\\" in part:
-                        for fp in _safe_rglob(repo_path, f"**/{name_only}"):
-                            _try_add(fp)
-                except NotImplementedError:
-                    pass
 
     # PRIORITY 2: Files referenced in trace hops
     for hop in hyp.get("trace_hops", []):
-        fname = hop.get("file", "")
+        fname = _clean_filename(str(hop.get("file", "")))
         if fname:
             name_only = Path(fname).name
-            try:
-                for fp in _safe_rglob(repo_path,name_only):
+            if "." in name_only:
+                for fp in _safe_rglob(repo_path, name_only):
                     _try_add(fp)
-                for fp in _safe_rglob(repo_path,f"**/{name_only}"):
+                for fp in _safe_rglob(repo_path, f"**/{name_only}"):
                     _try_add(fp)
-            except NotImplementedError:
-                pass
 
     # PRIORITY 3: Files containing the component name
     comp = hyp.get("component", "")

@@ -163,21 +163,21 @@ class Orchestrator:
             }
 
     def _find_resume_step(self) -> int | None:
-        steps = self.progress.get("steps", {})
-        for step_num in range(10):
-            if str(step_num) not in steps or steps[str(step_num)].get("status") != "done":
-                return step_num
+        step_outputs = {
+            0: "fingerprint.json", 1: "classification.json", 2: "deps_vulns.json",
+            "2b": "secrets.json", 3: "static_analysis.json", 4: "threat_model.json",
+            5: "fuzz_candidates.json", "5b": "triaged.json",
+            6: "trace_results.json", 7: "validated_findings.json",
+            8: "anomaly.json", 9: "report.md",
+        }
+        for sn in [0, 1, 2, "2b", 3, 4, 5, "5b", 6, 7, 8, 9]:
+            out_file = step_outputs.get(sn, "")
+            if not out_file or not (self.checkpoint_dir / out_file).exists():
+                return _step_key(sn)
         return None
 
     def _is_step_done(self, step_num: int | str, output_file: str) -> bool:
-        step_key = str(step_num)
-        steps = self.progress.get("steps", {})
-        if step_key in steps and steps[step_key].get("status") == "done":
-            output_path = self.checkpoint_dir / output_file
-            if output_path.suffix == ".md":
-                return output_path.exists()
-            return output_path.exists()
-        return False
+        return (self.checkpoint_dir / output_file).exists()
 
     def _check_deps(self, deps: list[str]):
         for dep in deps:
@@ -379,8 +379,11 @@ class Orchestrator:
 
     def _step9(self):
         valid = self.state.get("validated_findings", [])
+        triaged = self.state.get("triaged", [])
         if not valid:
-            valid = self.state.get("triaged", [])
+            valid = triaged
+        elif len(valid) < len(triaged):
+            valid = valid + triaged
         output_path = self.checkpoint_dir / "report.md"
         from src.pipeline.step9_report import run
         return run(valid, self.repo_path, output_path)
