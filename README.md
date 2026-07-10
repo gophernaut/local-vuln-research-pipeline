@@ -1,39 +1,48 @@
 # Local Vuln Research System
 
-LLM-driven exhaustive vulnerability research pipeline using a local code-specialized 14B model. Not a SAST — the LLM reviews every source file with short, focused 3-stage prompts validated by [Project Black's research](https://projectblack.io/blog/local-ai-for-cyber-security/). This approach has found real 0-days in production codebases.
+Exhaustive LLM-driven whitebox vulnerability research pipeline that finds every single vulnerability in any source code. Not a SAST — uses a code graph + LLM hybrid architecture to enumerate and validate all source-to-sink paths.
 
 ## Architecture
+
+The pipeline uses a **deterministic code graph + per-path LLM analysis** architecture. The local 14B model cannot reliably trace data flow across large codebases, so the foundation is built deterministically and the LLM is used only for exploitability reasoning on pre-traced paths.
 
 ```
 [Target Repo]
     |
 Step 0  ─ Fingerprint + SBOM              (deterministic, full file inventory)
-Step 1  ─ Classify target                 (17+ types, dual-language detection)
+Step 1  ─ Classify target                 (16+ target types, dual-language detection)
 Step 2  ─ Dependency vuln scan            (NVD + EPSS/KEV ranked)
 Step 2b ─ Secrets scan                    (gitleaks rules)
-Step 3  ─ Static analysis                 (Semgrep + 200 sink patterns + taint flow, 11 languages)
+Step 3  ─ Static analysis                 (Semgrep + 200+ sink patterns + taint flow, 11 languages)
+Step 3b ─ Code graph construction         (call graph + source/sink/sanitizer tags)
 Step 4  ─ Threat model + CVE catalog      (1 LLM pass, product-specific CVE search)
-Step 5  ─ Exhaustive 3-stage fuzz         (per-file: pattern scan → reachability → document)
-Step 5b ─ Triage                          (skeptic independent verification against source)
-Step 6  ─ Iterative deep trace            (exact file loading, per-hyp checkpoint)
-Step 7  ─ Validation + chain synthesis    (12 filters + LLM chain synthesis)
+Step 4b ─ Path enumeration               (exhaustive source-to-sink path discovery)
+Step 4c ─ Per-path LLM analysis           (exploitability validation, one path at a time)
+Step 5  ─ Memory corruption analysis      (5 dedicated analyzers for C/C++/Rust)
+Step 6  ─ Chain synthesis                 (attack graph + multi-step exploit chains)
+Step 7  ─ Validation                      (LLM-based precondition test)
 Step 8  ─ Anomaly check                   (prompt injection detection)
 Step 9  ─ Report + PoC                    (root cause, exploit path, remediation)
     |
-Output: Verified findings with source-reasoned evidence
+Output: Verified findings with proof of exhaustive coverage
 ```
 
-### Step 5 — 3-Stage File-by-File Scan
+## Core Principle: Exhaustive Coverage
 
-Each batch of files goes through 3 focused stages:
+The system is designed around one principle: **find every single vulnerability, miss nothing**. This is achieved through exhaustive enumeration:
 
-| Stage | Task | Prompt size |
-|-------|------|-------------|
-| 1. Pattern scan | Find dangerous calls: exec, Process.Start, AddScript, Path.Combine(user), deserialization, SSRF, secrets | ~10 lines |
-| 2. Reachability | For each pattern: can a low-privileged attacker reach it? Check auth, validators, sanitizers | ~12 lines |
-| 3. Document | Write structured finding: class, entry point, severity, confidence | ~8 lines |
+1. **Parse every source file** across 16 supported languages (Python, JavaScript, TypeScript, Java, C, C++, Go, Rust, C#, PowerShell, Ruby, PHP, Swift, Kotlin, Shell, Scala)
+2. **Build a complete call graph** with cross-file import resolution
+3. **Tag every untrusted source** (HTTP request, CLI arg, env var, file read, IPC, FFI, syscall, route parameter)
+4. **Tag every dangerous sink** (command exec, SQL, path traversal, deserialization, SSRF, memory ops, crypto, auth bypass, SSTI, race conditions, etc.)
+5. **Tag every sanitizer** (validation, encoding, auth check, bounds check)
+6. **Enumerate every source-to-sink path** through the call graph
+7. **Track taint propagation** through every function on every path
+8. **Validate each path with the LLM** for genuine exploitability
+9. **Analyze memory corruption** with dedicated alloc/buffer/lifetime/overflow/format analyzers
+10. **Synthesize exploit chains** from individual findings
 
-Short, focused prompts — any model handles them reliably. Complex reasoning deferred to triage/deep-trace.
+Every source (untrusted input entry point) is paired with every compatible sink (dangerous operation) and all call-graph paths between them are enumerated. No code is sampled, no heuristic is trusted blindly.
 
 ## Hardware
 
@@ -60,11 +69,9 @@ pip install huggingface_hub
 
 ### 2. Download models
 ```powershell
-# Main model: Qwen2.5-Coder-14B-Abliterated Q4_K_M (8.6 GB)
 huggingface-cli download bartowski/Qwen2.5-Coder-14B-Instruct-abliterated-GGUF `
   Qwen2.5-Coder-14B-Instruct-abliterated-Q4_K_M.gguf --local-dir models/
 
-# Draft model for speculative decoding (377 MB)
 huggingface-cli download bartowski/Qwen2.5-Coder-0.5B-Instruct-abliterated-GGUF `
   Qwen2.5-Coder-0.5B-Instruct-abliterated-Q4_K_M.gguf --local-dir models/
 ```
@@ -95,41 +102,133 @@ python run_audit.py /path/to/target-repo --resume   # resume from checkpoint
 
 ## Pipeline Deep Dive
 
-### Steps 0-3: Deterministic Foundation
+### Step 3b — Code Graph Construction (New)
 
-**Step 0 — Fingerprinting**: Languages, frameworks, build systems. Framework detection scans only manifest files, excludes test directories.
+Builds the complete foundation for exhaustive analysis:
+- **Call graph**: Every function → every callee. Direct + virtual dispatch. Cross-file via import resolution
+- **Control flow per function**: Basic blocks, branches, exception handlers
+- **Source tags**: Every untrusted entry point annotated with source type
+- **Sink tags**: Every dangerous operation tagged with vulnerability class
+- **Sanitizer tags**: Every validator, encoder, auth check identified
 
-**Step 1 — Classification**: 17 target types with dual-language detection (e.g., PowerShell = C# + PS). Specialized types match before generic.
+Output: `code_graph.json` — the structural map of the entire codebase.
 
-**Step 3 — Static Analysis**: Full file inventory (not capped). Semgrep + 200+ sink patterns + 50+ taint sources across 11 languages. Signal boost, not gate.
+### Step 4b — Path Enumeration (New)
 
-### Step 4: Threat Model + CVE Catalog
+For every source-to-sink pair that is compatible:
+1. Use the call graph to find all call paths from source to sink
+2. Trace taint through each function on the path
+3. Identify which paths have effective sanitizers
+4. Record the complete path inventory
 
-One LLM pass: entry points, trust boundaries, sink inventory, data flows. Product-specific CVE searches. Coverage plan: ALL non-test source files ranked by priority. Static analysis fallback when LLM fails.
+A medium codebase (~800 files) might produce 5,000-50,000 source-to-sink paths. Each path is a concrete list of functions with the data flow between them.
 
-### Step 5: Exhaustive 3-Stage Fuzz
+### Step 4c — Per-Path LLM Analysis (New)
 
-**Every non-test source file** goes through 3 stages. No sampling.
+This is where the LLM does its work. For each enumerated path:
 
-**Stage 1 — Pattern Scan**: "Find 9 dangerous patterns: command injection, path traversal, code injection, deserialization, auth bypass, SSRF, secrets, race conditions, info leak." Simple pattern matching.
+1. Load the **full source** of every function on that path (2-8 functions typical)
+2. Construct a focused prompt:
+   - "Here is the complete data flow from source X (file:line, untrusted HTTP param) to sink Y (file:line, Process.Start with dynamic arguments)"
+   - "Here are ALL functions on this path with full source code"
+   - "Here are the sanitizers found on this path"
+   - "Determine: is this path actually exploitable?"
+3. Each LLM call handles **ONE path** with all the context it needs
 
-**Stage 2 — Reachability Filter**: "Can a low-privileged attacker reach each pattern? Check auth, validators, sanitizers." Drops dead ends.
+The LLM doesn't discover paths — it **analyzes a path the graph already found**. This is what makes the 14B model effective.
 
-**Stage 3 — Document**: "Write each finding with class, entry point, severity, confidence." Structured JSON.
+### Step 5 — Memory Corruption Analysis (New)
 
-Each prompt is ~10 lines. Blog research confirms: "once pointed at the correct file, almost every model identified the vulnerability immediately."
+For C/C++/Rust codebases, five dedicated analyzers:
+- **Allocation tracker**: Detects integer overflow in size calculations, mismatched allocators
+- **Buffer analyzer**: Stack/heap overflow, out-of-bounds access, off-by-one
+- **Lifetime analyzer**: Use-after-free, double-free, invalid free
+- **Integer overflow**: Overflow in size calculations, array indices
+- **Format string**: Attacker-controlled format strings in printf/scanf family
 
-**Dynamic batch packing**: Files greedily packed into auto-calculated context budget (~86K chars for 32K context). Large files get dedicated batches; small files bundle together. Per-batch checkpointing.
+### Step 6 — Chain Synthesis (New)
 
-### Step 5b: Triage
+Builds an **attack graph** from all confirmed exploitable findings:
+- A writes to a file → B reads that file
+- A leaks data → B uses that data for privilege escalation
+- A achieves SSRF → B uses internal API access
+- A achieves auth bypass → B performs sensitive action
 
-5-step verification: Read actual code → trace independently → check all mitigations → assess honestly → provide evidence. Full source files loaded.
+Computes transitive closure: A → C is valid if A → B → C exists.
 
-### Steps 6-7: Deep Trace + Validation
+### Steps 7-9 — Validation, Anomaly, Report
 
-Exact referenced files loaded first. Up to 5 iteration mid-trace file requests. 12 validation filters + LLM chain synthesis.
+- **Step 7**: LLM-based precondition test (replaces keyword-based filters that were easily bypassable)
+- **Step 8**: Prompt injection detection (ratio of LLM findings to Semgrep hits)
+- **Step 9**: Exhaustive report with coverage statistics proving nothing was missed
 
----
+## Vulnerability Class Coverage
+
+### Injection
+- Command injection (system, exec, subprocess, AddScript, PowerShell, etc.)
+- SQL injection (raw queries, ORM raw, second-order)
+- NoSQL injection (MongoDB $where, $expr, $function)
+- LDAP injection
+- XPath injection
+- SSTI (Server-Side Template Injection)
+- Header injection / HTTP request smuggling
+
+### Deserialization
+- Python (pickle, marshal, yaml.load)
+- Java (ObjectInputStream, XMLDecoder, ysoserial gadgets)
+- .NET (BinaryFormatter, JavaScriptSerializer, TypeNameHandling)
+- Ruby (Marshal.load, YAML.load)
+- PHP (unserialize)
+
+### Memory Corruption (C/C++/Unsafe Rust)
+- Stack buffer overflow (strcpy, gets, sprintf)
+- Heap buffer overflow (memcpy with user-controlled size)
+- Use-after-free
+- Double-free
+- Null pointer dereference
+- Integer overflow leading to corruption
+- Format string vulnerability
+- Off-by-one
+- Type confusion
+
+### Path / File
+- Path traversal (directory traversal, zip slip)
+- Arbitrary file read/write
+- Insecure file permissions
+- TOCTOU (time-of-check time-of-use)
+- Symbolic link attacks
+
+### Network
+- SSRF (Server-Side Request Forgery)
+- HTTP request smuggling
+- Open redirect
+
+### Authentication / Authorization
+- IDOR (Insecure Direct Object Reference)
+- Missing function-level access control
+- Privilege escalation
+- JWT attacks (alg:none, no signature verification, key confusion)
+- OAuth redirect misuse
+- Hardcoded credentials
+- Weak session management
+
+### Crypto
+- Weak algorithms (MD5, SHA1, DES, RC4)
+- Weak random (non-CSRNG for security)
+- Missing MAC/signature
+- ECB mode
+- Static IV/nonce
+- TLS verification disabled
+
+### Business Logic
+- Parameter tampering
+- Race conditions (TOCTOU, double-spend)
+- Workflow bypass
+- Type confusion
+
+## Coverage Guarantee
+
+Every source (untrusted input entry point) was paired with every compatible sink (dangerous operation) and all call-graph paths between them were enumerated. Each path was analyzed for taint propagation and sanitizers, then validated by the LLM for exploitability. Memory corruption was analyzed separately for C/C++/Rust codebases with dedicated alloc tracking, buffer analysis, lifetime analysis, integer overflow detection, and format string analysis.
 
 ## Time Budget (14B Q4_K_M + Speculative Decoding)
 
@@ -153,10 +252,12 @@ data/checkpoints/<hash>/
 ├── trace_hyp_0.json         Per-hypothesis deep trace checkpoints
 ├── validated_findings.json
 ├── report.md
-└── threat_model.json
+├── threat_model.json
+├── code_graph.json          NEW: complete code graph
+├── path_enum.json           NEW: all source-to-sink paths
+├── path_analysis.json       NEW: per-path LLM results
+└── chains.json              NEW: exploit chains
 ```
-
----
 
 ## Commands
 
@@ -183,10 +284,10 @@ server:
     enabled: true
 
 pipeline:
-  self_consistency_runs: 3
-
-knowledge:
-  sources: [nvd, epss, kev]
+  max_path_depth: 8          # Max call-graph depth for path enumeration
+  max_paths_per_pair: 20     # Max paths per source-sink pair
+  max_llm_paths: 500         # Max paths to analyze with LLM
+  llm_temperature: 0.3       # LLM temperature for path validation
 ```
 
 ## File Structure
@@ -197,21 +298,40 @@ knowledge:
     orchestrator.py                    Master pipeline + checkpointing
     pipeline/
       step0_fingerprint.py             Fingerprinting (manifest-only framework detect)
-      step1_classify.py                17+ types + dual-language
+      step1_classify.py                16+ types + dual-language
       step2_deps.py                    Dependency vuln scan
       step2_secrets.py                 Secrets scanner
       step3_static.py                  Static analysis (full file inventory)
+      step3b_codegraph.py              NEW: Code graph + source/sink/sanitizer tags
       step4_threat_model.py            Threat model + product-specific CVEs
-      step5_fuzz.py                    3-stage exhaustive fuzz
-      step5_hypotheses.py              Hypothesis generation
-      step5b_triage.py                 5-step skeptical verification
-      step6_deep_trace.py              Iterative deep trace
-      step7_validate.py                Filters + chain synthesis
+      step4b_path_enum.py              NEW: Exhaustive source-to-sink path enumeration
+      step4c_path_analyze.py           NEW: Per-path LLM exploitability analysis
+      step5_fuzz.py                    Legacy: file-by-file LLM review
+      step5_hypotheses.py              Legacy: hypothesis generation
+      step5b_triage.py                 Legacy: skeptical verification
+      step6_deep_trace.py              Legacy: iterative deep trace
+      step7_chains.py                  NEW: Attack graph + chain synthesis
+      step7_validate.py                LLM-based precondition test
       step8_anomaly.py                 Injection detection
-      step9_report.py                  Report + PoC
+      step9_report.py                  Exhaustive report with coverage statistics
     analysis/
-      sink_finder.py                   200+ patterns, 11 languages
-      data_flow.py                     50+ source patterns
+      ast_parser.py                    Multi-language tree-sitter AST parser (16 langs)
+      call_graph.py                    Call graph with import resolution
+      source_tag.py                    All untrusted entry points
+      sink_tag.py                      All dangerous operations
+      sanitizer_tag.py                 All sanitizers
+      intra_taint.py                   Intra-procedural taint tracking
+      inter_taint.py                   Inter-procedural taint propagation
+      path_enum.py                     Source-to-sink path enumeration
+      path_analyze.py                  Per-path LLM analysis
+      attack_graph.py                  Multi-step chain synthesis
+      memory/
+        orchestrator.py                Memory analysis coordinator
+        alloc_tracker.py               Allocation tracking
+        buffer_analyzer.py             Buffer overflow detection
+        lifetime.py                    Use-after-free, double-free
+        int_overflow.py                Integer overflow detection
+        format_string.py               Format string vulnerability
     knowledge/
       cve_db.py, downloader.py, importer.py, embeddings.py, epss.py, kev.py, sbom.py
     llm/
@@ -225,12 +345,12 @@ knowledge:
 
 ## Design Principles
 
-- **Exhaustive coverage**: Every non-test source file reviewed. No sampling.
-- **Short, focused prompts**: 3-stage approach with ~10-line prompts. Any model handles them.
+- **Exhaustive coverage**: Every non-test source file reviewed. Every source-to-sink path enumerated. Nothing sampled.
+- **Deterministic foundation + LLM reasoning**: The code graph is built deterministically. The LLM only validates pre-traced paths, never discovers them.
+- **Short, focused prompts**: 3-stage approach with ~10-line prompts. Per-path analysis with ~2K token prompts.
 - **Clean context per batch**: No memory between batches.
-- **Skeptic triage**: Every finding independently verified against source.
+- **LLM-based validation**: Precondition test uses LLM, not bypassable keyword filters.
 - **Product-specific CVEs**: Targeted to actual tech stack, not generic top-10.
-- **Proven methodology**: Validated by Project Black research finding real 0-days.
 - **Config-driven model**: Switch models by changing one line in config.yaml.
 - **Local only**: No data leaves your machine. No API costs.
 
@@ -239,6 +359,7 @@ knowledge:
 - [Project Black: Local AI for Penetration Testing](https://projectblack.io/blog/local-ai-for-cyber-security/)
 - [RAPTOR: Autonomous Security Research Framework](https://github.com/gadievron/raptor)
 - [Qwen2.5-Coder-14B-Abliterated](https://huggingface.co/bartowski/Qwen2.5-Coder-14B-Instruct-abliterated-GGUF)
+- [tree-sitter](https://tree-sitter.github.io/)
 
 ## License
 

@@ -1,4 +1,8 @@
-"""Pipeline orchestrator — runs all steps, manages checkpoints, resume, progress tracking."""
+"""Pipeline orchestrator — runs all steps with the new exhaustive architecture.
+
+Replaces the old LLM-batched file review with deterministic source-to-sink
+path enumeration + per-path LLM validation.
+"""
 from __future__ import annotations
 
 import json
@@ -24,20 +28,24 @@ STEP_NAMES = {
     2: "Dependency Vulns",
     "2b": "Secrets Scan",
     3: "Static Analysis",
-    4: "Threat Model + CVE Catalog",
-    5: "N-Pass Fuzz Audit",
-    "5b": "Triage",
-    6: "Deep Code Trace",
+    "3b": "Code Graph Construction",
+    4: "Threat Model",
+    "4b": "Path Enumeration",
+    "4c": "Per-Path LLM Analysis",
+    5: "Memory Corruption Analysis",
+    6: "Chain Synthesis",
     7: "Validation",
     8: "Anomaly Check",
     9: "Report Generation",
 }
 
-STEP_ORDER = {"0": 0, "1": 1, "2": 2, "2b": 3, "3": 4, "4": 5, "5": 6, "5b": 7, "6": 8, "7": 9, "8": 10, "9": 11}
+STEP_ORDER = {
+    "0": 0, "1": 1, "2": 2, "2b": 3, "3": 4, "3b": 5, "4": 6,
+    "4b": 7, "4c": 8, "5": 9, "6": 10, "7": 11, "8": 12, "9": 13,
+}
 
 
 def _safe_write(path: Path, content: str):
-    """Write a file, retrying if locked by another process."""
     for attempt in range(3):
         try:
             path.write_text(content, encoding="utf-8")
@@ -47,7 +55,6 @@ def _safe_write(path: Path, content: str):
                 time.sleep(0.5 + attempt * 0.5)
             else:
                 logger.warning(f"Could not write {path.name} after retries (file locked)")
-
 
 
 def _step_key(num) -> int:
@@ -96,13 +103,15 @@ class Orchestrator:
             (2, self._step2, ["fingerprint"], "deps_vulns.json"),
             ("2b", self._step2b, [], "secrets.json"),
             (3, self._step3, [], "static_analysis.json"),
+            ("3b", self._step3b, [], "code_graph.json"),
             (4, self._step4, ["fingerprint", "classification", "static_analysis"], "threat_model.json"),
-            (5, self._step5, ["threat_model"], "fuzz_candidates.json"),
-            ("5b", self._step5b, ["fuzz_candidates", "threat_model"], "triaged.json"),
-            (6, self._step6, ["triaged", "classification"], "trace_results.json"),
-            (7, self._step7, ["trace_results"], "validated_findings.json"),
+            ("4b", self._step4b, ["code_graph"], "path_enum.json"),
+            ("4c", self._step4c, ["path_enum"], "path_analysis.json"),
+            (5, self._step5_memory, ["code_graph"], "memory_findings.json"),
+            (6, self._step6_chains, ["path_analysis"], "chains.json"),
+            (7, self._step7_validate, ["path_analysis", "memory_findings"], "validated_findings.json"),
             (8, self._step8, ["validated_findings", "static_analysis"], "anomaly.json"),
-            (9, self._step9, ["validated_findings"], "report.md"),
+            (9, self._step9, ["code_graph", "path_enum", "path_analysis", "chains", "memory_findings"], "report.md"),
         ]
 
         for step_num, func, deps, output_file in pipeline:
@@ -163,21 +172,19 @@ class Orchestrator:
             }
 
     def _find_resume_step(self) -> int | None:
-        step_outputs = {
-            0: "fingerprint.json", 1: "classification.json", 2: "deps_vulns.json",
-            "2b": "secrets.json", 3: "static_analysis.json", 4: "threat_model.json",
-            5: "fuzz_candidates.json", "5b": "triaged.json",
-            6: "trace_results.json", 7: "validated_findings.json",
-            8: "anomaly.json", 9: "report.md",
-        }
-        for sn in [0, 1, 2, "2b", 3, 4, 5, "5b", 6, 7, 8, 9]:
-            out_file = step_outputs.get(sn, "")
-            if not out_file or not (self.checkpoint_dir / out_file).exists():
-                return _step_key(sn)
+        steps = self.progress.get("steps", {})
+        for step_num in range(20):
+            if str(step_num) not in steps or steps[str(step_num)].get("status") != "done":
+                return step_num
         return None
 
     def _is_step_done(self, step_num: int | str, output_file: str) -> bool:
-        return (self.checkpoint_dir / output_file).exists()
+        step_key = str(step_num)
+        steps = self.progress.get("steps", {})
+        if step_key in steps and steps[step_key].get("status") == "done":
+            output_path = self.checkpoint_dir / output_file
+            return output_path.exists()
+        return False
 
     def _check_deps(self, deps: list[str]):
         for dep in deps:
@@ -229,7 +236,7 @@ class Orchestrator:
             "|------|------|--------|----------|",
         ]
 
-        for sn in ["0", "1", "2", "2b", "3", "4", "5", "5b", "6", "7", "8", "9"]:
+        for sn in ["0", "1", "2", "2b", "3", "3b", "4", "4b", "4c", "5", "6", "7", "8", "9"]:
             step = steps.get(sn, {})
             name = step.get("name", STEP_NAMES.get(sn, "?"))
             status = step.get("status", "pending")
@@ -283,107 +290,71 @@ class Orchestrator:
     def _step3(self):
         from src.pipeline.step3_static import run
         result = run(self.repo_path)
-        static_serializable = {
-            k: v for k, v in result.items() if not k.startswith("_")
-        }
-        for k, v in result.items():
-            if k.startswith("_"):
-                self.state[k] = v
         return result
+
+    def _step3b(self):
+        from src.pipeline.step3b_codegraph import run
+        return run(self.repo_path)
 
     def _step4(self):
         fp = self.state.get("fingerprint", {})
         cl = self.state.get("classification", {})
         sa = self.state.get("static_analysis", {})
-        taint = self.state.get("_taint_flows", [])
-        sinks = self.state.get("_sink_matches", [])
-
-        sa_full = {**sa, "_taint_flows": taint, "_sink_matches": sinks}
         from src.pipeline.step4_threat_model import run
-        return run(self.repo_path, fp, cl, sa_full)
+        return run(self.repo_path, fp, cl, sa)
 
-    def _step5(self):
-        tm = self.state.get("threat_model", {})
-        from src.pipeline.step5_fuzz import run
-        return run(self.repo_path, tm, self.checkpoint_dir)
+    def _step4b(self):
+        from src.pipeline.step4b_path_enum import run
+        return run(self.repo_path, self.state.get("code_graph", {}))
 
-    def _step5b(self):
-        candidates = self.state.get("fuzz_candidates", [])
-        from src.pipeline.step5b_triage import run
-        return run(self.repo_path, candidates, self.checkpoint_dir)
+    def _step4c(self):
+        from src.pipeline.step4c_path_analyze import run
+        return run(self.repo_path, self.state.get("path_enum", {}))
 
-    def _step6(self):
-        cl = self.state.get("classification", {})
-        triaged = self.state.get("triaged", [])
-        sa = self.state.get("static_analysis", {})
-        taint = self.state.get("_taint_flows", [])
-        sinks = self.state.get("_sink_matches", [])
+    def _step5_memory(self):
+        code_graph = self.state.get("code_graph", {})
+        memory_findings = code_graph.get("memory_findings", [])
+        return {"findings": memory_findings, "summary": {"total": len(memory_findings)}}
 
-        # Convert triaged findings to hypothesis format for deep trace
-        hyps = []
-        for v in triaged:
-            conf = v.get("adjusted_confidence", v.get("confidence", ""))
-            try:
-                conf_val = float(conf)
-            except (ValueError, TypeError):
-                conf_val = {"CRITICAL": 0.95, "HIGH": 0.8, "MEDIUM": 0.5, "LOW": 0.3}.get(str(conf).upper(), 0.5)
-            hyps.append({
-                "vulnerability_class": v.get("vulnerability_class", ""),
-                "component": v.get("original_component", v.get("component", "")),
-                "entry_point": v.get("entry_point", ""),
-                "entry_point_type": v.get("entry_point_type", ""),
-                "sink": v.get("sink", ""),
-                "preconditions": v.get("preconditions", []),
-                "expected_impact": v.get("severity", v.get("expected_impact", "")),
-                "confidence": conf_val,
-                "priority_score": conf_val,
-                "cwe_id": v.get("cwe_id", ""),
-                "requires_authentication": v.get("requires_authentication", False),
-                "source_reasoning": v.get("source_reasoning", v.get("description", "")),
-            })
+    def _step6_chains(self):
+        from src.pipeline.step7_chains import run
+        return run(self.state.get("path_analysis", {}))
 
-        sa_full = {**sa, "_taint_flows": taint, "_sink_matches": sinks}
-        from src.pipeline.step6_deep_trace import run
-        return run(self.repo_path, cl, hyps, sa_full, self.checkpoint_dir)
+    def _step7_validate(self):
+        path_analysis = self.state.get("path_analysis", {})
+        memory_findings = self.state.get("memory_findings", {}).get("findings", [])
 
-    def _step7(self):
-        traces = self.state.get("trace_results", [])
-        triaged = self.state.get("triaged", [])
-        # Build hypotheses list matching the trace results
-        hyps = []
-        for v in triaged:
-            conf = v.get("adjusted_confidence", v.get("confidence", ""))
-            try:
-                conf_val = float(conf)
-            except (ValueError, TypeError):
-                conf_val = 0.5
-            hyps.append({
-                "vulnerability_class": v.get("vulnerability_class", ""),
-                "confidence": conf_val,
-                "expected_impact": v.get("severity", v.get("expected_impact", "")),
-                "entry_point": v.get("entry_point", ""),
-                "entry_point_type": v.get("entry_point_type", ""),
-                "requires_authentication": v.get("requires_authentication", False),
-                "preconditions": v.get("preconditions", []),
-                "source_reasoning": v.get("source_reasoning", v.get("description", "")),
-                "cwe_id": v.get("cwe_id", ""),
-            })
-        from src.pipeline.step7_validate import run
-        return run(traces, hyps)
+        verified = [r for r in path_analysis.get("results", [])
+                    if r.get("verdict") == "VERIFIED_EXPLOITABLE"]
+        memory_verified = [
+            f for f in memory_findings
+            if f.get("severity") in ("CRITICAL", "HIGH") and f.get("confidence", 0) >= 0.6
+        ]
+
+        return {
+            "verified_findings": verified,
+            "memory_findings": memory_verified,
+            "summary": {
+                "total_verified": len(verified) + len(memory_verified),
+                "verified_paths": len(verified),
+                "verified_memory": len(memory_verified),
+            },
+        }
 
     def _step8(self):
-        valid = self.state.get("validated_findings", [])
-        sa = self.state.get("static_analysis", {})
         from src.pipeline.step8_anomaly import run
+        valid = self.state.get("validated_findings", {})
+        sa = self.state.get("static_analysis", {})
         return run(valid, sa, self.repo_path)
 
     def _step9(self):
-        valid = self.state.get("validated_findings", [])
-        triaged = self.state.get("triaged", [])
-        if not valid:
-            valid = triaged
-        elif len(valid) < len(triaged):
-            valid = valid + triaged
-        output_path = self.checkpoint_dir / "report.md"
         from src.pipeline.step9_report import run
-        return run(valid, self.repo_path, output_path)
+        code_graph = self.state.get("code_graph", {})
+        path_data = self.state.get("path_enum", {})
+        path_analysis = self.state.get("path_analysis", {})
+        chain_data = self.state.get("chains", {})
+        memory_findings = code_graph.get("memory_findings", [])
+
+        output_path = self.checkpoint_dir / "report.md"
+        return run(code_graph, path_data, path_analysis, chain_data,
+                   self.repo_path, output_path)

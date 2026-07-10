@@ -1,17 +1,18 @@
-"""Multi-language AST parser using tree-sitter.
+"""Multi-language AST parser using tree-sitter — ALL 16 supported languages.
 
 Extracts: functions, classes, method calls, imports, string literals,
-assignments, and entry points per language.
+assignments, entry points, and type information per language.
 
-Gracefully degrades if tree-sitter language packages are not installed.
+Tree-sitter languages: Python, JavaScript, TypeScript, Java, C, C++, Go, Rust, C#
+Regex fallback: PHP, Ruby, PowerShell, Kotlin, Swift, Shell
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-LANGUAGE_PARSERS: dict[str, Any] = {}
 TREE_SITTER_AVAILABLE = False
 TREE_SITTER_PARSER: Any = None
 
@@ -22,52 +23,79 @@ try:
 except ImportError:
     pass
 
+LANGUAGE_PARSERS: dict[str, Any] = {}
+
 if TREE_SITTER_AVAILABLE:
-    try:
-        import tree_sitter_python as tspy
-        LANGUAGE_PARSERS["python"] = tspy.language()
-    except (ImportError, AttributeError):
-        pass
-
-    try:
-        import tree_sitter_javascript as tsjs
-        LANGUAGE_PARSERS["javascript"] = tsjs.language()
-    except (ImportError, AttributeError):
-        pass
-
-    try:
-        import tree_sitter_typescript as tsts
+    _TS_MODULES = {
+        "python": ("tree_sitter_python", "language"),
+        "javascript": ("tree_sitter_javascript", "language"),
+        "typescript": ("tree_sitter_typescript", "language_tsx"),
+        "java": ("tree_sitter_java", "language"),
+        "c": ("tree_sitter_c", "language"),
+        "cpp": ("tree_sitter_cpp", "language"),
+        "go": ("tree_sitter_go", "language"),
+        "rust": ("tree_sitter_rust", "language"),
+        "csharp": ("tree_sitter_c_sharp", "language"),
+    }
+    for lang_name, (module_name, attr) in _TS_MODULES.items():
         try:
-            LANGUAGE_PARSERS["typescript"] = tsts.language_tsx()
-        except AttributeError:
+            mod = __import__(module_name)
+            lang_obj = getattr(mod, attr)()
+            LANGUAGE_PARSERS[lang_name] = lang_obj
+        except (ImportError, AttributeError):
             pass
-    except ImportError:
-        pass
 
+
+def _ts_query(lang_obj, query_string: str):
+    """Compile a tree-sitter query using the modern API."""
+    if not TREE_SITTER_AVAILABLE:
+        return None
+    try:
+        from tree_sitter import Query, QueryCursor
+        import textwrap
+        cleaned = textwrap.dedent(query_string).strip()
+        query = Query(lang_obj, cleaned)
+        return query
+    except Exception as e:
+        import sys
+        print(f'Query compile error: {e}', file=sys.stderr)
+        return None
+
+
+def _ts_captures(query, node):
+    """Run a compiled query and return captures dict."""
+    if query is None:
+        return {}
+    try:
+        from tree_sitter import QueryCursor
+        cursor = QueryCursor(query)
+        return cursor.captures(node)
+    except Exception:
+        return {}
 
 LANGUAGE_EXTENSIONS = {
-    ".py": "python",
-    ".pyi": "python",
-    ".js": "javascript",
-    ".jsx": "javascript",
-    ".mjs": "javascript",
-    ".ts": "typescript",
-    ".tsx": "typescript",
-    ".java": "java",
-    ".c": "c",
-    ".h": "c",
-    ".cpp": "cpp",
-    ".cc": "cpp",
-    ".cxx": "cpp",
-    ".hpp": "cpp",
+    ".py": "python", ".pyi": "python",
+    ".js": "javascript", ".jsx": "javascript", ".mjs": "javascript",
+    ".ts": "typescript", ".tsx": "typescript",
+    ".java": "java", ".kt": "java", ".scala": "java",
+    ".c": "c", ".h": "c",
+    ".cpp": "cpp", ".cc": "cpp", ".cxx": "cpp", ".hpp": "cpp",
     ".go": "go",
     ".rs": "rust",
-    ".cs": "csharp",
+    ".cs": "csharp", ".csx": "csharp", ".vb": "csharp",
     ".rb": "ruby",
-    ".php": "php",
+    ".php": "php", ".phtml": "php",
+    ".ps1": "powershell", ".psm1": "powershell", ".psd1": "powershell",
+    ".swift": "swift",
+    ".sh": "shell", ".bash": "shell", ".zsh": "shell",
 }
 
 LANG_TO_EXT = {v: k for k, v in LANGUAGE_EXTENSIONS.items()}
+
+SKIP_DIRS = {"node_modules", ".git", "__pycache__", ".venv", "venv",
+             "target", "build", "dist", "vendor", ".next", ".nuxt",
+             ".idea", ".vscode", "bin", "obj", "Debug", "Release",
+             "packages", "TestResults", ".deps", ".libs"}
 
 
 @dataclass
@@ -79,6 +107,11 @@ class FunctionDef:
     params: list[str] = field(default_factory=list)
     body: str = ""
     is_exported: bool = False
+    is_static: bool = False
+    is_constructor: bool = False
+    class_name: str = ""
+    return_type: str = ""
+    annotations: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -88,6 +121,7 @@ class CallSite:
     function_name: str
     arguments: list[str] = field(default_factory=list)
     caller_function: str = ""
+    object_name: str = ""
 
 
 @dataclass
@@ -97,6 +131,7 @@ class EntryPoint:
     type: str
     name: str
     description: str
+    http_method: str = ""
 
 
 @dataclass
@@ -105,6 +140,29 @@ class ImportInfo:
     line: int
     module: str
     imported_names: list[str] = field(default_factory=list)
+    alias: str = ""
+
+
+@dataclass
+class ClassDef:
+    name: str
+    file: str
+    line: int
+    end_line: int
+    superclass: str = ""
+    interfaces: list[str] = field(default_factory=list)
+    methods: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Variable:
+    name: str
+    file: str
+    line: int
+    var_type: str = ""
+    assigned_from: str = ""
+    is_param: bool = False
+    scope: str = ""
 
 
 @dataclass
@@ -116,32 +174,33 @@ class FileAnalysis:
     entry_points: list[EntryPoint] = field(default_factory=list)
     imports: list[ImportInfo] = field(default_factory=list)
     string_literals: list[str] = field(default_factory=list)
-    class_definitions: list[str] = field(default_factory=list)
+    class_definitions: list[ClassDef] = field(default_factory=list)
+    variables: list[Variable] = field(default_factory=list)
     lines: int = 0
+    raw_source: str = ""
 
 
 class ASTParser:
     def __init__(self):
         self._parsers: dict[str, Any] = {}
         if TREE_SITTER_AVAILABLE:
-            self._init_available_parsers()
-
-    def _init_available_parsers(self):
-        for lang, lang_obj in LANGUAGE_PARSERS.items():
-            try:
-                parser = TREE_SITTER_PARSER()
-                parser.set_language(Language(lang_obj))
-                self._parsers[lang] = parser
-            except Exception:
-                pass
+            for lang, lang_obj in LANGUAGE_PARSERS.items():
+                try:
+                    wrapped = Language(lang_obj)
+                    parser = TREE_SITTER_PARSER(wrapped)
+                    self._parsers[lang] = parser
+                except Exception:
+                    try:
+                        parser = TREE_SITTER_PARSER()
+                        parser.set_language(Language(lang_obj))
+                        self._parsers[lang] = parser
+                    except Exception:
+                        pass
 
     def parse_file(self, filepath: Path) -> FileAnalysis | None:
         ext = filepath.suffix.lower()
         language = LANGUAGE_EXTENSIONS.get(ext)
         if not language:
-            return None
-
-        if language not in self._parsers:
             return None
 
         try:
@@ -150,22 +209,49 @@ class ASTParser:
         except Exception:
             return None
 
-        relative_path = str(filepath)
+        relative_path = str(filepath.relative_to(filepath.anchor)) if filepath.is_absolute() else str(filepath)
 
+        if language in self._parsers:
+            return self._parse_with_tree_sitter(source, relative_path, language)
+
+        return self._parse_with_regex(source, relative_path, language)
+
+    def _parse_with_tree_sitter(self, source: str, path: str, language: str) -> FileAnalysis:
+        analysis = FileAnalysis(path=path, language=language, lines=source.count("\n"), raw_source=source)
         parser = self._parsers[language]
         tree = parser.parse(source.encode("utf-8"))
+        root = tree.root_node
 
-        analysis = FileAnalysis(
-            path=relative_path,
-            language=language,
-            lines=source.count("\n"),
-        )
-
-        self._extract_functions(tree.root_node, source, analysis)
-        self._extract_call_sites(tree.root_node, source, analysis)
-        self._extract_entry_points(tree.root_node, source, analysis)
-        self._extract_imports(tree.root_node, source, analysis)
-        self._extract_classes(tree.root_node, source, analysis)
+        try:
+            self._extract_functions(root, source, analysis)
+        except Exception as e:
+            import sys
+            print(f'function extract error: {e}', file=sys.stderr)
+        try:
+            self._extract_call_sites(root, source, analysis)
+        except Exception as e:
+            import sys
+            print(f'call sites error: {e}', file=sys.stderr)
+        try:
+            self._extract_entry_points(root, source, analysis)
+        except Exception as e:
+            import sys
+            print(f'entry points error: {e}', file=sys.stderr)
+        try:
+            self._extract_imports(root, source, analysis)
+        except Exception as e:
+            import sys
+            print(f'imports error: {e}', file=sys.stderr)
+        try:
+            self._extract_classes(root, source, analysis)
+        except Exception as e:
+            import sys
+            print(f'classes error: {e}', file=sys.stderr)
+        try:
+            self._extract_variables(root, source, analysis)
+        except Exception as e:
+            import sys
+            print(f'variables error: {e}', file=sys.stderr)
 
         return analysis
 
@@ -176,6 +262,8 @@ class ASTParser:
             files.extend(repo_path.rglob(f"*{ext}"))
 
         for filepath in files:
+            if any(d in filepath.parts for d in SKIP_DIRS):
+                continue
             analysis = self.parse_file(filepath)
             if analysis:
                 results.append(analysis)
@@ -183,174 +271,806 @@ class ASTParser:
         return results
 
     def _extract_functions(self, node, source: str, analysis: FileAnalysis):
-        query = None
         lang = analysis.language
+        parser_obj = self._parsers.get(lang)
+        if parser_obj is None:
+            return
+        lang_obj = parser_obj.language
 
-        try:
-            query_lang = self._parsers[lang].language
+        queries = {
+            "python": """(function_definition
+                    name: (identifier) @name
+                    parameters: (parameters) @params
+                    body: (block) @body) @func""",
+            "javascript": """(function_declaration
+                    name: (identifier) @name
+                    parameters: (formal_parameters) @params
+                    body: (statement_block) @body) @func""",
+            "typescript": """(function_declaration
+                    name: (identifier) @name
+                    parameters: (formal_parameters) @params
+                    body: (statement_block) @body) @func""",
+            "java": """(method_declaration
+                    name: (identifier) @name
+                    parameters: (formal_parameters) @params
+                    body: (block) @body) @func""",
+            "c": """(function_definition
+                    declarator: (function_declarator
+                        declarator: (identifier) @name
+                        parameters: (parameter_list) @params)
+                    body: (compound_statement) @body) @func""",
+            "cpp": """(function_definition
+                    declarator: (function_declarator
+                        declarator: [(identifier) @name
+                                      (field_identifier) @name]
+                        parameters: (parameter_list) @params)
+                    body: (compound_statement) @body) @func""",
+            "go": """(function_declaration
+                    name: (identifier) @name
+                    parameters: (parameter_list) @params
+                    body: (block) @body) @func""",
+            "rust": """(function_item
+                    name: (identifier) @name
+                    parameters: (parameters) @params
+                    body: (block) @body) @func""",
+            "csharp": """(method_declaration
+                    name: (identifier) @name
+                    parameters: (parameter_list) @params
+                    body: (block) @body) @func""",
+        }
+
+        query_str = queries.get(lang)
+        if not query_str:
+            return
+
+        query = _ts_query(lang_obj, query_str)
+        if query is None:
+            return
+
+        captures = _ts_captures(query, node)
+        if not captures:
+            return
+
+        func_nodes_list: list = []
+        body_nodes: list = []
+        params_nodes: list = []
+        name_nodes: list = []
+
+        for cap_name, nodes in captures.items():
+            if cap_name == "func":
+                for n in nodes:
+                    func_nodes_list.append(n)
+            elif cap_name == "name":
+                name_nodes = nodes
+            elif cap_name == "params":
+                params_nodes = nodes
+            elif cap_name == "body":
+                body_nodes = nodes
+
+        for func_node in func_nodes_list:
+            fdata = {"node": func_node}
+            func_start = func_node.start_byte
+            func_end = func_node.end_byte
+
+            for nn in name_nodes:
+                if func_start <= nn.start_byte < func_end:
+                    fdata["name"] = source[nn.start_byte:nn.end_byte]
+                    break
+
+            for pn in params_nodes:
+                if func_start <= pn.start_byte < func_end:
+                    fdata["params_text"] = source[pn.start_byte:pn.end_byte]
+                    break
+
+            for bn in body_nodes:
+                if func_start <= bn.start_byte < func_end:
+                    fdata["body"] = source[bn.start_byte:bn.end_byte]
+                    fdata["end_line"] = bn.end_point[0] + 1
+                    break
+
+            if "name" not in fdata:
+                continue
+
+            class_name = self._find_enclosing_class_name(func_node, source)
+            is_static = False
+            if class_name and func_node.parent:
+                for sibling in func_node.parent.children:
+                    if sibling.type == "decorator":
+                        dec_text = source[sibling.start_byte:sibling.end_byte]
+                        if "staticmethod" in dec_text:
+                            is_static = True
+                        if "classmethod" in dec_text:
+                            is_static = True
+
+            analysis.functions.append(FunctionDef(
+                name=fdata["name"],
+                file=analysis.path,
+                line=func_node.start_point[0] + 1,
+                end_line=fdata.get("end_line", func_node.end_point[0] + 1),
+                body=fdata.get("body", ""),
+                is_constructor=(fdata["name"] == "__init__"),
+                is_static=is_static,
+                class_name=class_name,
+                params=self._extract_param_names(fdata.get("params_text", ""), lang),
+            ))
+
+    def _find_enclosing_class_name(self, func_node, source: str) -> str:
+        current = func_node.parent
+        while current is not None:
+            if current.type in ("class_definition", "class_declaration",
+                                "class_specifier", "struct_item", "impl_item",
+                                "trait_item", "interface_declaration"):
+                for child in current.children:
+                    if child.type in ("identifier", "name", "type_identifier"):
+                        return source[child.start_byte:child.end_byte]
+                return ""
+            current = current.parent
+        return ""
+
+    def _extract_param_names(self, params_text: str, lang: str) -> list[str]:
+        if not params_text:
+            return []
+        params_text = params_text.strip("()").strip()
+        if not params_text:
+            return []
+        parts = [p.strip() for p in params_text.split(",")]
+        names = []
+        for p in parts:
+            if not p:
+                continue
             if lang in ("python",):
-                query = query_lang.query("""
-                    (function_definition
-                        name: (identifier) @name
-                        parameters: (parameters) @params
-                        body: (block) @body) @func
-                """)
-            elif lang in ("javascript", "typescript"):
-                query = query_lang.query("""
-                    (function_declaration
-                        name: (identifier) @name
-                        parameters: (formal_parameters) @params
-                        body: (statement_block) @body) @func
-                """)
-
-            if query is None:
-                return
-
-            captures = query.captures(node)
-            func_nodes = {}
-            for cap_node, cap_name in captures:
-                if cap_name == "func":
-                    func_nodes[cap_node.id] = {"node": cap_node}
-                elif cap_name == "name":
-                    parent_id = cap_node.parent.id if cap_node.parent else None
-                    if parent_id in func_nodes:
-                        func_nodes[parent_id]["name"] = source[cap_node.start_byte:cap_node.end_byte]
-                elif cap_name == "body":
-                    for fid, fdata in list(func_nodes.items()):
-                        if cap_node.start_byte >= fdata["node"].start_byte and cap_node.end_byte <= fdata["node"].end_byte:
-                            func_nodes[fid]["body"] = source[cap_node.start_byte:cap_node.end_byte]
-                            func_nodes[fid]["end_line"] = cap_node.end_point[0] + 1
-
-            for fid, fdata in func_nodes.items():
-                if "name" in fdata:
-                    analysis.functions.append(FunctionDef(
-                        name=fdata["name"],
-                        file=analysis.path,
-                        line=fdata["node"].start_point[0] + 1,
-                        end_line=fdata.get("end_line", fdata["node"].end_point[0] + 1),
-                        body=fdata.get("body", ""),
-                    ))
-        except Exception:
-            pass
+                tokens = p.split(":")
+                if tokens:
+                    names.append(tokens[0].strip().lstrip("*").lstrip("&").split()[-1])
+            elif lang in ("java", "csharp"):
+                tokens = p.split()
+                if tokens:
+                    names.append(tokens[-1])
+            elif lang in ("javascript", "typescript", "go", "rust"):
+                tokens = p.split()
+                if tokens:
+                    names.append(tokens[0].lstrip("&").lstrip("*"))
+            elif lang in ("c", "cpp"):
+                tokens = p.replace("const", "").replace("volatile", "").split()
+                if tokens:
+                    names.append(tokens[-1].lstrip("*").lstrip("&"))
+            else:
+                tokens = p.split()
+                if tokens:
+                    names.append(tokens[-1].lstrip("*").lstrip("&"))
+        return [n for n in names if n.isidentifier()]
 
     def _extract_call_sites(self, node, source: str, analysis: FileAnalysis):
-        try:
-            lang = analysis.language
-            query_lang = self._parsers[lang].language
+        lang = analysis.language
+        parser_obj = self._parsers.get(lang)
+        if parser_obj is None:
+            return
+        lang_obj = parser_obj.language
 
-            if lang in ("python",):
-                query = query_lang.query("""
-                    (call
-                        function: (identifier) @func_name
-                        arguments: (argument_list) @args) @call
-                """)
-            elif lang in ("javascript", "typescript"):
-                query = query_lang.query("""
-                    (call_expression
-                        function: (identifier) @func_name
-                        arguments: (arguments) @args) @call
-                """)
-            else:
-                return
+        queries = {
+            "python": """(call
+                    function: [(identifier) @func_name
+                              (attribute
+                                attribute: (identifier) @attr)]) @call""",
+            "javascript": """(call_expression
+                    function: [(identifier) @func_name
+                              (member_expression
+                                property: (property_identifier) @attr)]) @call""",
+            "typescript": """(call_expression
+                    function: [(identifier) @func_name
+                              (member_expression
+                                property: (property_identifier) @attr)]) @call""",
+            "java": """(method_invocation
+                    name: (identifier) @func_name) @call""",
+            "c": """(call_expression
+                    function: (identifier) @func_name) @call""",
+            "cpp": """(call_expression
+                    function: [(identifier) @func_name
+                              (field_expression
+                                field: (field_identifier) @attr)]) @call""",
+            "go": """(call_expression
+                    function: [(identifier) @func_name
+                              (selector_expression
+                                field: (field_identifier) @attr)]) @call""",
+            "rust": """(call_expression
+                    function: [(identifier) @func_name
+                              (field_expression
+                                field: (field_identifier) @attr)]) @call""",
+            "csharp": """(invocation_expression
+                    function: [(identifier_name) @func_name
+                              (member_access_expression
+                                name: (identifier_name) @attr)]) @call""",
+        }
 
-            captures = query.captures(node)
-            for cap_node, cap_name in captures:
-                if cap_name == "func_name":
+        query_str = queries.get(lang)
+        if not query_str:
+            return
+
+        query = _ts_query(lang_obj, query_str)
+        if query is None:
+            return
+
+        captures = _ts_captures(query, node)
+        if not captures:
+            return
+
+        seen_calls = set()
+        for cap_name, cap_nodes in captures.items():
+            if cap_name in ("func_name", "attr"):
+                for cap_node in cap_nodes:
+                    line = cap_node.start_point[0] + 1
+                    call_key = (line, cap_name)
+                    if call_key in seen_calls:
+                        continue
+                    seen_calls.add(call_key)
+
                     func_name = source[cap_node.start_byte:cap_node.end_byte]
+                    if len(func_name) > 100:
+                        continue
+                    obj_name = ""
+                    if cap_node.parent and cap_node.parent.type in (
+                        "member_expression", "field_expression",
+                        "selector_expression", "attribute", "method_invocation",
+                        "call",
+                    ):
+                        obj_field = cap_node.parent.child_by_field_name("object")
+                        if obj_field is None and cap_node.parent.type == "method_invocation":
+                            obj_field = cap_node.parent.child_by_field_name("object")
+                        if obj_field is None and cap_node.parent.type == "call":
+                            if cap_node.parent.parent and cap_node.parent.parent.type == "call":
+                                for sib in cap_node.parent.parent.children:
+                                    if sib.type == "attribute" and sib != cap_node.parent:
+                                        obj_field = sib.child_by_field_name("object")
+                                        break
+                        if obj_field:
+                            obj_name = source[obj_field.start_byte:obj_field.end_byte]
+
                     analysis.call_sites.append(CallSite(
                         file=analysis.path,
-                        line=cap_node.start_point[0] + 1,
+                        line=line,
                         function_name=func_name,
+                        object_name=obj_name,
                     ))
-        except Exception:
-            pass
 
     def _extract_entry_points(self, node, source: str, analysis: FileAnalysis):
         lang = analysis.language
-
         if lang in ("python",):
-            # Flask/FastAPI/Django route decorators
-            route_patterns = [
-                r"@app\.(route|get|post|put|delete|patch)\(",
-                r"@router\.(get|post|put|delete|patch)\(",
-                r"@blueprint\.route\(",
-                r"@api\.(get|post|put|delete)\(",
-            ]
-            for pattern in route_patterns:
-                for match in self._regex_find(source, pattern):
-                    line = source[:match[0]].count("\n") + 1
-                    analysis.entry_points.append(EntryPoint(
-                        file=analysis.path, line=line, type="HTTP_ROUTE",
-                        name=f"decorator@{line}", description="HTTP route handler",
-                    ))
-
+            self._python_entry_points(source, analysis)
         elif lang in ("javascript", "typescript"):
-            route_patterns = [
-                r"app\.(get|post|put|delete|patch|use)\(",
-                r"router\.(get|post|put|delete|patch|use)\(",
-            ]
-            for pattern in route_patterns:
-                for match in self._regex_find(source, pattern):
-                    line = source[:match[0]].count("\n") + 1
-                    analysis.entry_points.append(EntryPoint(
-                        file=analysis.path, line=line, type="HTTP_ROUTE",
-                        name=f"express@{line}", description="Express route handler",
-                    ))
+            self._js_entry_points(source, analysis)
+        elif lang == "java":
+            self._java_entry_points(source, analysis)
+        elif lang in ("c", "cpp"):
+            self._native_entry_points(source, analysis)
+        elif lang == "go":
+            self._go_entry_points(source, analysis)
+        elif lang == "rust":
+            self._rust_entry_points(source, analysis)
+        elif lang == "csharp":
+            self._csharp_entry_points(source, analysis)
+        elif lang == "ruby":
+            self._ruby_entry_points(source, analysis)
+        elif lang == "php":
+            self._php_entry_points(source, analysis)
+        elif lang == "powershell":
+            self._powershell_entry_points(source, analysis)
+
+    def _python_entry_points(self, source: str, analysis: FileAnalysis):
+        patterns = [
+            (r"@app\.(route|get|post|put|delete|patch|options|head)\s*\(", "HTTP_ROUTE"),
+            (r"@router\.(get|post|put|delete|patch|options)\s*\(", "HTTP_ROUTE"),
+            (r"@blueprint\.route\s*\(", "HTTP_ROUTE"),
+            (r"@api\.(get|post|put|delete|patch)\s*\(", "HTTP_ROUTE"),
+            (r"if\s+__name__\s*==\s*['\"]__main__['\"]", "MAIN_ENTRY"),
+            (r"def\s+main\s*\(", "MAIN_ENTRY"),
+            (r"argparse\.ArgumentParser", "CLI"),
+            (r"click\.(command|group)", "CLI"),
+            (r"typer\.Typer", "CLI"),
+        ]
+        for pattern, ep_type in patterns:
+            for m in re.finditer(pattern, source):
+                line = source[:m.start()].count("\n") + 1
+                http_method = ""
+                if ep_type == "HTTP_ROUTE":
+                    http_method = m.group(1).upper() if m.group(1) else "GET"
+                analysis.entry_points.append(EntryPoint(
+                    file=analysis.path, line=line, type=ep_type,
+                    name=f"ep_{line}", description=f"{ep_type} entry point",
+                    http_method=http_method,
+                ))
+
+        route_param_pattern = r"@app\.route\s*\(\s*['\"][^'\"]*<(\w+)>[^'\"]*['\"]"
+        for m in re.finditer(route_param_pattern, source):
+            param_name = m.group(1)
+            line = source[:m.start()].count("\n") + 1
+            analysis.entry_points.append(EntryPoint(
+                file=analysis.path, line=line, type="HTTP_ROUTE",
+                name=f"route_param_{param_name}",
+                description=f"Route parameter: {param_name}",
+                http_method="GET",
+            ))
+
+    def _js_entry_points(self, source: str, analysis: FileAnalysis):
+        patterns = [
+            (r"app\.(get|post|put|delete|patch|use|all)\s*\(", "HTTP_ROUTE"),
+            (r"router\.(get|post|put|delete|patch|use|all)\s*\(", "HTTP_ROUTE"),
+            (r"server\.listen\s*\(", "SERVER_LISTEN"),
+            (r"module\.exports", "EXPORT"),
+            (r"process\.argv", "CLI"),
+            (r"app\.listen\s*\(", "SERVER_LISTEN"),
+        ]
+        for pattern, ep_type in patterns:
+            for m in re.finditer(pattern, source):
+                line = source[:m.start()].count("\n") + 1
+                http_method = ""
+                if ep_type == "HTTP_ROUTE":
+                    http_method = m.group(1).upper() if m.group(1) else "GET"
+                analysis.entry_points.append(EntryPoint(
+                    file=analysis.path, line=line, type=ep_type,
+                    name=f"ep_{line}", description=f"{ep_type} entry point",
+                    http_method=http_method,
+                ))
+
+    def _java_entry_points(self, source: str, analysis: FileAnalysis):
+        patterns = [
+            (r"@(?:GetMapping|PostMapping|PutMapping|DeleteMapping|RequestMapping|PatchMapping)\s*\(", "HTTP_ROUTE"),
+            (r"public\s+static\s+void\s+main\s*\(", "MAIN_ENTRY"),
+            (r"HttpServlet", "SERVLET"),
+            (r"@WebServlet", "SERVLET"),
+            (r"@RestController", "REST_CONTROLLER"),
+            (r"@Controller", "CONTROLLER"),
+        ]
+        for pattern, ep_type in patterns:
+            for m in re.finditer(pattern, source):
+                line = source[:m.start()].count("\n") + 1
+                http_method = ""
+                if ep_type == "HTTP_ROUTE":
+                    name = m.group(0).lower()
+                    if "get" in name: http_method = "GET"
+                    elif "post" in name: http_method = "POST"
+                    elif "put" in name: http_method = "PUT"
+                    elif "delete" in name: http_method = "DELETE"
+                analysis.entry_points.append(EntryPoint(
+                    file=analysis.path, line=line, type=ep_type,
+                    name=f"ep_{line}", description=f"{ep_type} entry point",
+                    http_method=http_method,
+                ))
+
+    def _native_entry_points(self, source: str, analysis: FileAnalysis):
+        patterns = [
+            (r"\bmain\s*\(\s*(?:int|void)\s+\w+\s*,\s*(?:char|wchar_t)\s*\*\s*\w+\s*\[\s*\]", "MAIN_ENTRY"),
+            (r"\bWinMain\s*\(", "MAIN_ENTRY"),
+            (r"\bDllMain\s*\(", "DLL_ENTRY"),
+            (r"\bEXPORT\s+\w+\s+__cdecl\s+\w+", "EXPORTED_FUNC"),
+            (r"\b__declspec\s*\(\s*dllexport\s*\)", "EXPORTED_FUNC"),
+            (r"\bSYSCALL_DEFINE\d*\s*\(", "SYSCALL"),
+            (r"\bioctl\s*\(", "IOCTL_HANDLER"),
+        ]
+        for pattern, ep_type in patterns:
+            for m in re.finditer(pattern, source):
+                line = source[:m.start()].count("\n") + 1
+                analysis.entry_points.append(EntryPoint(
+                    file=analysis.path, line=line, type=ep_type,
+                    name=f"ep_{line}", description=f"{ep_type} entry point",
+                ))
+
+    def _go_entry_points(self, source: str, analysis: FileAnalysis):
+        patterns = [
+            (r"func\s+main\s*\(\s*\)", "MAIN_ENTRY"),
+            (r"http\.HandleFunc\s*\(", "HTTP_ROUTE"),
+            (r"http\.ListenAndServe\s*\(", "SERVER_LISTEN"),
+            (r"net\.Listen\s*\(", "SERVER_LISTEN"),
+            (r"func\s+\w+\s*\(\s*w\s+http\.ResponseWriter", "HTTP_HANDLER"),
+            (r"grpc\.NewServer\s*\()", "GRPC_SERVER"),
+        ]
+        for pattern, ep_type in patterns:
+            for m in re.finditer(pattern, source):
+                line = source[:m.start()].count("\n") + 1
+                analysis.entry_points.append(EntryPoint(
+                    file=analysis.path, line=line, type=ep_type,
+                    name=f"ep_{line}", description=f"{ep_type} entry point",
+                ))
+
+    def _rust_entry_points(self, source: str, analysis: FileAnalysis):
+        patterns = [
+            (r"fn\s+main\s*\(", "MAIN_ENTRY"),
+            (r"#\[actix_web::main\]", "ACTIX_MAIN"),
+            (r"#\[tokio::main\]", "TOKIO_MAIN"),
+            (r"async\s+fn\s+\w+\s*\(\s*\w+:\s*Request", "HTTP_HANDLER"),
+            (r"#\[get\s*\(", "HTTP_ROUTE"),
+            (r"#\[post\s*\(", "HTTP_ROUTE"),
+            (r"#\[put\s*\(", "HTTP_ROUTE"),
+            (r"#\[delete\s*\(", "HTTP_ROUTE"),
+            (r"#\[no_mangle\]", "EXPORTED_FUNC"),
+            (r"pub\s+extern\s+\"C\"", "FFI_EXPORT"),
+        ]
+        for pattern, ep_type in patterns:
+            for m in re.finditer(pattern, source):
+                line = source[:m.start()].count("\n") + 1
+                analysis.entry_points.append(EntryPoint(
+                    file=analysis.path, line=line, type=ep_type,
+                    name=f"ep_{line}", description=f"{ep_type} entry point",
+                ))
+
+    def _csharp_entry_points(self, source: str, analysis: FileAnalysis):
+        patterns = [
+            (r"\[Http(Get|Post|Put|Delete|Patch)\s*\(", "HTTP_ROUTE"),
+            (r"static\s+void\s+Main\s*\(", "MAIN_ENTRY"),
+            (r"public\s+static\s+int\s+Main\s*\(", "MAIN_ENTRY"),
+            (r"static\s+async\s+Task\s+Main\s*\(", "MAIN_ENTRY"),
+            (r"\[ApiController\]", "API_CONTROLLER"),
+            (r"\[Authorize\s*\(", "AUTH_ENDPOINT"),
+            (r"app\.Map(Get|Post|Put|Delete)\s*\(", "MINIMAL_API"),
+        ]
+        for pattern, ep_type in patterns:
+            for m in re.finditer(pattern, source):
+                line = source[:m.start()].count("\n") + 1
+                http_method = ""
+                if ep_type in ("HTTP_ROUTE", "MINIMAL_API"):
+                    name = m.group(0).lower()
+                    if "get" in name: http_method = "GET"
+                    elif "post" in name: http_method = "POST"
+                    elif "put" in name: http_method = "PUT"
+                    elif "delete" in name: http_method = "DELETE"
+                analysis.entry_points.append(EntryPoint(
+                    file=analysis.path, line=line, type=ep_type,
+                    name=f"ep_{line}", description=f"{ep_type} entry point",
+                    http_method=http_method,
+                ))
+
+    def _ruby_entry_points(self, source: str, analysis: FileAnalysis):
+        patterns = [
+            (r"(get|post|put|delete|patch|match)\s+['\"/]", "HTTP_ROUTE"),
+            (r"get\s+['\"]/", "HTTP_ROUTE"),
+            (r"post\s+['\"]/", "HTTP_ROUTE"),
+            (r"put\s+['\"]/", "HTTP_ROUTE"),
+            (r"delete\s+['\"]/", "HTTP_ROUTE"),
+            (r"Rack::Builder", "RACK_SERVER"),
+            (r"WEBrick", "WEBSERVER"),
+        ]
+        for pattern, ep_type in patterns:
+            for m in re.finditer(pattern, source):
+                line = source[:m.start()].count("\n") + 1
+                analysis.entry_points.append(EntryPoint(
+                    file=analysis.path, line=line, type=ep_type,
+                    name=f"ep_{line}", description=f"{ep_type} entry point",
+                ))
+
+    def _php_entry_points(self, source: str, analysis: FileAnalysis):
+        patterns = [
+            (r"\$_(?:GET|POST|REQUEST|COOKIE|FILES|SERVER)", "HTTP_REQUEST"),
+            (r"\bphp://input\b", "HTTP_BODY"),
+            (r"define\s*\(\s*['\"]", "CONST"),
+            (r"class\s+\w+\s+extends\s+(?:Controller|ApiController)", "CONTROLLER"),
+            (r"\bRoute::", "LARAVEL_ROUTE"),
+            (r"\bapp\(\s*['\"]router['\"]", "LARAVEL_ROUTE"),
+        ]
+        for pattern, ep_type in patterns:
+            for m in re.finditer(pattern, source):
+                line = source[:m.start()].count("\n") + 1
+                analysis.entry_points.append(EntryPoint(
+                    file=analysis.path, line=line, type=ep_type,
+                    name=f"ep_{line}", description=f"{ep_type} entry point",
+                ))
+
+    def _powershell_entry_points(self, source: str, analysis: FileAnalysis):
+        patterns = [
+            (r"function\s+\w+-\w+", "CMDLET"),
+            (r"\bparam\s*\(", "PARAM_BLOCK"),
+            (r"\bCmdletBinding\s*\(", "CMDLET"),
+            (r"\[CmdletBinding\s*\(", "CMDLET"),
+            (r"\bBegin\s*\{", "BEGIN_BLOCK"),
+            (r"\bProcess\s*\{", "PROCESS_BLOCK"),
+        ]
+        for pattern, ep_type in patterns:
+            for m in re.finditer(pattern, source):
+                line = source[:m.start()].count("\n") + 1
+                analysis.entry_points.append(EntryPoint(
+                    file=analysis.path, line=line, type=ep_type,
+                    name=f"ep_{line}", description=f"{ep_type} entry point",
+                ))
 
     def _extract_imports(self, node, source: str, analysis: FileAnalysis):
-        try:
-            lang = analysis.language
-            query_lang = self._parsers[lang].language
+        lang = analysis.language
+        parser_obj = self._parsers.get(lang)
+        if parser_obj is None:
+            self._extract_imports_regex(source, analysis)
+            return
+        lang_obj = parser_obj.language
 
-            if lang in ("python",):
-                query = query_lang.query("""
-                    (import_statement name: (dotted_name) @module) @import
-                    (import_from_statement module_name: (dotted_name) @module name: (dotted_name) @alias) @import
-                """)
-            elif lang in ("javascript", "typescript"):
-                query = query_lang.query("""
-                    (import_statement source: (string) @module) @import
-                """)
-            else:
-                return
+        queries = {
+            "python": """(import_statement
+                    name: (dotted_name) @module)""",
+            "javascript": """(import_statement
+                    source: (string) @module)""",
+            "typescript": """(import_statement
+                    source: (string) @module)""",
+            "java": """(import_declaration
+                    (scoped_identifier) @module)""",
+            "c": """(preproc_include
+                    path: (string_literal) @module)""",
+            "cpp": """(preproc_include
+                    path: [(string_literal) @module
+                          (system_lib_string) @module])""",
+            "go": """(import_declaration
+                    (import_spec
+                        path: [(interpreted_string_literal) @module
+                              (raw_string_literal) @module]))""",
+            "rust": """(use_declaration
+                    path: (scoped_identifier) @module)""",
+            "csharp": """(using_directive
+                    (qualified_name) @module)""",
+        }
 
-            captures = query.captures(node)
-            for cap_node, cap_name in captures:
-                if cap_name == "module":
+        query_str = queries.get(lang)
+        if not query_str:
+            return
+
+        query = _ts_query(lang_obj, query_str)
+        if query is None:
+            return
+
+        captures = _ts_captures(query, node)
+        if not captures:
+            return
+
+        for cap_name, cap_nodes in captures.items():
+            if cap_name == "module":
+                for cap_node in cap_nodes:
                     module_name = source[cap_node.start_byte:cap_node.end_byte].strip("'\"")
                     analysis.imports.append(ImportInfo(
                         file=analysis.path,
                         line=cap_node.start_point[0] + 1,
                         module=module_name,
                     ))
-        except Exception:
-            pass
+
+    def _extract_imports_regex(self, source: str, analysis: FileAnalysis):
+        patterns = {
+            "ruby": [
+                (r"require\s+['\"]([^'\"]+)['\"]", "require"),
+                (r"require_relative\s+['\"]([^'\"]+)['\"]", "require_relative"),
+            ],
+            "php": [
+                (r"use\s+([\w\\]+)\s*;", "use"),
+                (r"require_once\s+['\"]([^'\"]+)['\"]", "require_once"),
+                (r"include_once\s+['\"]([^'\"]+)['\"]", "include_once"),
+            ],
+            "powershell": [
+                (r"\.?\s*Import-Module\s+['\"]([^'\"]+)['\"]", "import_module"),
+                (r"\.?\s*[\./][^\s]+\.psm1", "dot_source"),
+            ],
+            "swift": [
+                (r"import\s+(\w+)", "import"),
+            ],
+            "shell": [
+                (r"source\s+([^\s]+)", "source"),
+                (r"\.\s+([^\s]+)", "dot_source"),
+            ],
+            "kotlin": [
+                (r"import\s+([\w.]+)", "import"),
+            ],
+        }
+
+        lang_patterns = patterns.get(analysis.language, [])
+        for pattern, kind in lang_patterns:
+            for m in re.finditer(pattern, source):
+                module = m.group(1)
+                analysis.imports.append(ImportInfo(
+                    file=analysis.path,
+                    line=source[:m.start()].count("\n") + 1,
+                    module=module,
+                ))
 
     def _extract_classes(self, node, source: str, analysis: FileAnalysis):
-        try:
-            lang = analysis.language
-            query_lang = self._parsers[lang].language
+        lang = analysis.language
+        parser_obj = self._parsers.get(lang)
+        if parser_obj is None:
+            self._extract_classes_regex(source, analysis)
+            return
+        lang_obj = parser_obj.language
 
-            if lang in ("python",):
-                query = query_lang.query("""
-                    (class_definition name: (identifier) @name) @class
-                """)
-            elif lang in ("javascript", "typescript"):
-                query = query_lang.query("""
-                    (class_declaration name: (identifier) @name) @class
-                """)
-            else:
-                return
+        queries = {
+            "python": "(class_definition name: (identifier) @name)",
+            "javascript": "(class_declaration name: (identifier) @name)",
+            "typescript": "(class_declaration name: (type_identifier) @name)",
+            "java": "(class_declaration name: (identifier) @name)",
+            "cpp": "(class_specifier name: (type_identifier) @name)",
+            "rust": "(struct_item name: (type_identifier) @name)",
+            "go": "(type_declaration (type_spec name: (type_identifier) @name))",
+            "csharp": "(class_declaration name: (identifier) @name)",
+        }
 
-            captures = query.captures(node)
-            for cap_node, cap_name in captures:
-                if cap_name == "name":
-                    analysis.class_definitions.append(
-                        source[cap_node.start_byte:cap_node.end_byte]
-                    )
-        except Exception:
-            pass
+        query_str = queries.get(lang)
+        if not query_str:
+            return
+
+        query = _ts_query(lang_obj, query_str)
+        if query is None:
+            return
+
+        captures = _ts_captures(query, node)
+        if not captures:
+            return
+
+        for cap_name, cap_nodes in captures.items():
+            if cap_name == "name":
+                for cap_node in cap_nodes:
+                    class_name = source[cap_node.start_byte:cap_node.end_byte]
+                    parent = cap_node.parent
+                    start_line = cap_node.start_point[0] + 1
+                    end_line = parent.end_point[0] + 1 if parent else start_line + 10
+                    superclass = ""
+                    if parent:
+                        for child in parent.children:
+                            if child.type in ("superclass", "super_interfaces", "argument_list"):
+                                superclass = source[child.start_byte:child.end_byte]
+                                break
+                    analysis.class_definitions.append(ClassDef(
+                        name=class_name, file=analysis.path,
+                        line=start_line, end_line=end_line,
+                        superclass=superclass,
+                    ))
+
+    def _extract_classes_regex(self, source: str, analysis: FileAnalysis):
+        patterns = [
+            r"class\s+(\w+)(?:\s+extends\s+(\w+))?(?:\s+implements\s+([\w\s,]+))?",
+            r"module\s+(\w+)",
+            r"struct\s+(\w+)",
+            r"enum\s+(\w+)",
+            r"protocol\s+(\w+)",
+        ]
+        for pattern in patterns:
+            for m in re.finditer(pattern, source):
+                class_name = m.group(1)
+                superclass = m.group(2) if m.lastindex and m.lastindex >= 2 else ""
+                line = source[:m.start()].count("\n") + 1
+                analysis.class_definitions.append(ClassDef(
+                    name=class_name, file=analysis.path,
+                    line=line, end_line=line + 20,
+                    superclass=superclass or "",
+                ))
+
+    def _extract_variables(self, node, source: str, analysis: FileAnalysis):
+        lang = analysis.language
+        parser_obj = self._parsers.get(lang)
+        if parser_obj is None:
+            return
+        lang_obj = parser_obj.language
+
+        queries = {
+            "python": """(assignment
+                    left: (identifier) @name)""",
+            "javascript": """(variable_declarator
+                    name: (identifier) @name)""",
+            "typescript": """(variable_declarator
+                    name: (identifier) @name)""",
+            "java": """(variable_declarator
+                    name: (identifier) @name)""",
+            "c": """(init_declarator
+                    declarator: (identifier) @name)""",
+            "cpp": """(init_declarator
+                    declarator: (identifier) @name)""",
+            "go": """(short_var_declaration
+                    left: (expression_list
+                        (identifier) @name))""",
+            "rust": """(let_declaration
+                    pattern: (identifier) @name)""",
+            "csharp": """(variable_declarator
+                    name: (identifier) @name)""",
+        }
+
+        query_str = queries.get(lang)
+        if not query_str:
+            return
+
+        query = _ts_query(lang_obj, query_str)
+        if query is None:
+            return
+
+        captures = _ts_captures(query, node)
+        if not captures:
+            return
+
+        for cap_name, cap_nodes in captures.items():
+            if cap_name == "name":
+                for cap_node in cap_nodes:
+                    var_name = source[cap_node.start_byte:cap_node.end_byte]
+                    if len(var_name) > 100:
+                        continue
+                    analysis.variables.append(Variable(
+                        name=var_name,
+                        file=analysis.path,
+                        line=cap_node.start_point[0] + 1,
+                    ))
 
     def _regex_find(self, text: str, pattern: str) -> list[tuple[int, int]]:
-        import re
         return [(m.start(), m.end()) for m in re.finditer(pattern, text)]
+
+    def _parse_with_regex(self, source: str, path: str, language: str) -> FileAnalysis:
+        analysis = FileAnalysis(path=path, language=language, lines=source.count("\n"), raw_source=source)
+
+        lang_func_patterns = {
+            "ruby": [
+                r"(?:def|proc)\s+(\w+(?:\.\w+)*)\s*(?:\(|\s|$)",
+            ],
+            "php": [
+                r"function\s+(\w+)\s*\(",
+                r"public\s+function\s+(\w+)\s*\(",
+                r"private\s+function\s+(\w+)\s*\(",
+                r"protected\s+function\s+(\w+)\s*\(",
+            ],
+            "powershell": [
+                r"function\s+([\w-]+)\s*(?:\{|$)",
+            ],
+            "swift": [
+                r"func\s+(\w+)\s*\(",
+                r"class\s+func\s+(\w+)\s*\(",
+            ],
+            "shell": [
+                r"(\w+)\s*\(\)\s*\{",
+                r"function\s+(\w+)\s*(?:\{|$)",
+            ],
+            "kotlin": [
+                r"fun\s+(\w+)\s*\(",
+            ],
+        }
+
+        func_patterns = lang_func_patterns.get(language, [])
+        for pattern in func_patterns:
+            for m in re.finditer(pattern, source):
+                func_name = m.group(1)
+                line = source[:m.start()].count("\n") + 1
+                end_line = line + 20
+                analysis.functions.append(FunctionDef(
+                    name=func_name, file=path, line=line, end_line=end_line,
+                ))
+
+        self._extract_imports_regex(source, analysis)
+        self._extract_classes_regex(source, analysis)
+
+        ep_patterns = {
+            "ruby": [
+                (r"(get|post|put|delete|patch)\s+['\"]/", "HTTP_ROUTE"),
+                (r"Rack::Builder", "RACK_SERVER"),
+            ],
+            "php": [
+                (r"\$_(?:GET|POST|REQUEST|COOKIE|FILES|SERVER)", "HTTP_REQUEST"),
+            ],
+            "powershell": [
+                (r"function\s+\w+-\w+", "CMDLET"),
+                (r"\bparam\s*\(", "PARAM_BLOCK"),
+            ],
+            "swift": [
+                (r"func\s+main\s*\(", "MAIN_ENTRY"),
+                (r"@\w+Server", "SERVER"),
+            ],
+            "shell": [
+                (r"#!/bin/(?:ba)?sh", "MAIN_ENTRY"),
+            ],
+            "kotlin": [
+                (r"fun\s+main\s*\(", "MAIN_ENTRY"),
+                (r"\b@GetMapping\b|\bPostMapping\b", "HTTP_ROUTE"),
+            ],
+        }
+
+        for pattern, ep_type in ep_patterns.get(language, []):
+            for m in re.finditer(pattern, source):
+                line = source[:m.start()].count("\n") + 1
+                analysis.entry_points.append(EntryPoint(
+                    file=analysis.path, line=line, type=ep_type,
+                    name=f"ep_{line}", description=f"{ep_type} entry point",
+                ))
+
+        call_patterns = [
+            (r"\b(\w+)\s*\(", "call"),
+        ]
+        for pattern, kind in call_patterns:
+            for m in re.finditer(pattern, source):
+                func_name = m.group(1)
+                line = source[:m.start()].count("\n") + 1
+                analysis.call_sites.append(CallSite(
+                    file=analysis.path, line=line, function_name=func_name,
+                ))
+
+        analysis.raw_source = source
+        return analysis

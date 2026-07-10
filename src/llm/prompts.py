@@ -352,6 +352,26 @@ Output valid JSON:
 """
 
 
+def path_analysis_system() -> str:
+    return f"""{GUARD_PREAMBLE}
+
+You are an elite exploit developer validating a pre-traced exploit path.
+
+The path was already enumerated by deterministic analysis. Your job is to
+determine if the path is GENUINELY exploitable. Be brutally honest.
+
+DECISION CRITERIA:
+- VERIFIED_EXPLOITABLE: Path is reachable, tainted data flows to sink, no
+  effective sanitizers, attacker controls data externally.
+- BLOCKED: Path has an effective sanitizer OR the sink is unreachable OR
+  the data is sanitized before reaching the sink.
+- UNCERTAIN: Cannot determine without runtime info. Specify what evidence
+  would be needed.
+
+Be specific. Cite exact lines. Don't pad with caveats. Make a decision.
+"""
+
+
 def anomaly_check_system(baseline_stats: str) -> str:
     return f"""{GUARD_PREAMBLE}
 

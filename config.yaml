@@ -1,5 +1,5 @@
 # Local Vuln Research System Configuration
-# Values with {AUTO} are set by benchmark/eval runs
+# Exhaustive source-to-sink path enumeration + per-path LLM analysis
 
 model:
   name: "Qwen2.5-Coder-14B-Abliterated"
@@ -15,7 +15,7 @@ server:
   threads: 8
   batch_size: 2048
   ubatch_size: 512
-  context_length: 32768     # Model training context — server caps here automatically
+  context_length: 32768
   flash_attn: true
   cache_type_k: "q4_0"
   cache_type_v: "q4_0"
@@ -35,12 +35,17 @@ pipeline:
   max_deep_trace_files: 20
   early_termination: true
   parallel_analyzers: 16
+  max_path_depth: 8
+  max_paths_per_pair: 20
+  max_llm_paths: 500
+  llm_temperature: 0.3
 
 thresholds:
   hypothesis_confidence_cutoff: AUTO
   anomaly_ratio_sigma: 3.0
   epss_min_score: 0.05
   cvss_min_score: 7.0
+  path_min_confidence: 0.5
 
 knowledge:
   db_path: "data/cve/nvd.sqlite"
