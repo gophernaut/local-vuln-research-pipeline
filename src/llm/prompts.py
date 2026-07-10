@@ -154,6 +154,87 @@ OUTPUT FORMAT — valid JSON:
 """
 
 
+def pattern_scan_system(target: str, language: str, primary: str, cve_text: str) -> str:
+    cve_hint = f"\n\nREFERENCE CVE PATTERNS (known exploits for this stack):\n{cve_text}" if cve_text else ""
+    return f"""{GUARD_PREAMBLE}
+
+You are scanning source code for dangerous security patterns.
+Target: {target} | Language: {language}
+
+FIND THESE PATTERNS:
+1. COMMAND INJECTION: exec(), system(), Process.Start(), AddScript(), Invoke-Expression — with user-controlled arguments
+2. PATH TRAVERSAL: user input reaching file paths — File.Read/Write, Path.Combine, require/include with user data
+3. CODE INJECTION: eval(), ScriptBlock.Create(), expression evaluation with user input
+4. DESERIALIZATION: BinaryFormatter.Deserialize, JsonConvert with TypeNameHandling — untrusted type resolution
+5. AUTH BYPASS: missing auth checks on sensitive operations, privilege checks without enforcement
+6. SSRF: HTTP clients with attacker-controlled URLs — HttpClient.GetStringAsync(user_url), webhook calls
+7. HARDCODED SECRETS: passwords, tokens, API keys in code
+8. RACE CONDITIONS: shared state without locks, TOCTOU between file check and file use
+9. INFO LEAK: stack traces in responses, sensitive data in error messages, debug endpoints
+
+For EACH pattern found, output: file, line, pattern_type, the dangerous code, what input reaches it.
+{cve_hint}
+
+Output valid JSON:
+{{"patterns": [
+  {{"file": "path/to/file.cs", "line": 42, "pattern_type": "COMMAND_INJECTION",
+    "code": "the actual line", "description": "Process.Start called with user-controlled $param"}}
+]}}
+"""
+
+
+def reachability_system(target: str, language: str) -> str:
+    return f"""{GUARD_PREAMBLE}
+
+For each pattern found, determine if a low-privileged attacker can realistically reach it.
+Target: {target} | Language: {language}
+
+CHECK EACH PATTERN:
+1. Is the entry point externally accessible? (HTTP endpoint, CLI, IPC, file parse, plugin API)
+2. Is there an auth check? If yes, what privilege level? Can a low-privileged user pass it?
+3. Are there validators/sanitizers between entry and sink? Check for: regex validation, type checks, allowlist, Path.GetFullPath, parameterized APIs
+4. Is this test code, example code, or dead code?
+5. Does the attacker control enough of the input to cause harm?
+
+Output valid JSON:
+{{"results": [
+  {{"pattern_index": 0, "reachable": true, "confidence": "HIGH|MEDIUM|LOW",
+    "entry_point": "how attacker reaches this",
+    "attack_scenario": "what an exploit looks like",
+    "blocking_mitigation": null or "what stops it"}}
+]}}
+"""
+
+
+def document_system(target: str, language: str) -> str:
+    return f"""{GUARD_PREAMBLE}
+
+Document reachable security findings as structured vulnerability candidates.
+Target: {target} | Language: {language}
+
+For each reachable pattern, write a finding with:
+- Specific vulnerability class (Command Injection, Path Traversal, Auth Bypass, etc.)
+- Exact file:line reference
+- How attacker reaches it (entry point type: HTTP, CLI, PS_PARAM, FILE_PARSE, IPC)
+- What makes it exploitable
+- Severity: CRITICAL (RCE, full compromise) | HIGH (data breach, privilege escalation) | MEDIUM (info leak, limited impact)
+- Confidence: HIGH (clear exploit path) | MEDIUM (likely but needs verification) | LOW (speculative)
+
+Output valid JSON:
+{{"candidates": [
+  {{"vulnerability_class": "Command Injection via PS parameter",
+    "component": "file:line — function",
+    "entry_point": "how attacker reaches", "entry_point_type": "PS_PARAM",
+    "sink": "dangerous operation at file:line",
+    "description": "brief summary", "severity": "HIGH",
+    "confidence": "HIGH", "cwe_id": "CWE-78",
+    "requires_authentication": true,
+    "source_reasoning": "why this code is vulnerable"
+  }}
+]}}
+"""
+
+
 def validate_system() -> str:
     return f"""{GUARD_PREAMBLE}
 

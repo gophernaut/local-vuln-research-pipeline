@@ -309,6 +309,11 @@ class Orchestrator:
         # Convert triaged findings to hypothesis format for deep trace
         hyps = []
         for v in triaged:
+            conf = v.get("adjusted_confidence", v.get("confidence", ""))
+            try:
+                conf_val = float(conf)
+            except (ValueError, TypeError):
+                conf_val = {"CRITICAL": 0.95, "HIGH": 0.8, "MEDIUM": 0.5, "LOW": 0.3}.get(str(conf).upper(), 0.5)
             hyps.append({
                 "vulnerability_class": v.get("vulnerability_class", ""),
                 "component": v.get("original_component", v.get("component", "")),
@@ -316,12 +321,12 @@ class Orchestrator:
                 "entry_point_type": v.get("entry_point_type", ""),
                 "sink": v.get("sink", ""),
                 "preconditions": v.get("preconditions", []),
-                "expected_impact": v.get("expected_impact", ""),
-                "confidence": v.get("adjusted_confidence", 0),
-                "priority_score": v.get("adjusted_confidence", 0),
+                "expected_impact": v.get("severity", v.get("expected_impact", "")),
+                "confidence": conf_val,
+                "priority_score": conf_val,
                 "cwe_id": v.get("cwe_id", ""),
                 "requires_authentication": v.get("requires_authentication", False),
-                "source_reasoning": v.get("source_reasoning", ""),
+                "source_reasoning": v.get("source_reasoning", v.get("description", "")),
             })
 
         sa_full = {**sa, "_taint_flows": taint, "_sink_matches": sinks}
@@ -334,15 +339,20 @@ class Orchestrator:
         # Build hypotheses list matching the trace results
         hyps = []
         for v in triaged:
+            conf = v.get("adjusted_confidence", v.get("confidence", ""))
+            try:
+                conf_val = float(conf)
+            except (ValueError, TypeError):
+                conf_val = 0.5
             hyps.append({
                 "vulnerability_class": v.get("vulnerability_class", ""),
-                "confidence": v.get("adjusted_confidence", 0),
-                "expected_impact": v.get("expected_impact", ""),
+                "confidence": conf_val,
+                "expected_impact": v.get("severity", v.get("expected_impact", "")),
                 "entry_point": v.get("entry_point", ""),
                 "entry_point_type": v.get("entry_point_type", ""),
                 "requires_authentication": v.get("requires_authentication", False),
                 "preconditions": v.get("preconditions", []),
-                "source_reasoning": v.get("source_reasoning", ""),
+                "source_reasoning": v.get("source_reasoning", v.get("description", "")),
                 "cwe_id": v.get("cwe_id", ""),
             })
         from src.pipeline.step7_validate import run

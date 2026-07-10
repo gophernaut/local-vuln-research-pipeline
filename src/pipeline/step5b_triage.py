@@ -131,6 +131,9 @@ def run(
         # Build candidate descriptions + collect referenced files
         candidates_text = ""
         code_files = {}
+        def _cf(level: str) -> float:
+            return {"CRITICAL": 1.0, "HIGH": 0.8, "MEDIUM": 0.5, "LOW": 0.3}.get(str(level).upper(), 0.5)
+
         for i, c in enumerate(batch):
             idx = deduped.index(c) if c in deduped else i
             candidates_text += (
@@ -138,29 +141,30 @@ def run(
                 f"  Component: {c.get('component', '?')}\n"
                 f"  Entry: {c.get('entry_point', '?')} [{c.get('entry_point_type', '?')}]\n"
                 f"  Sink: {c.get('sink', '?')}\n"
-                f"  Confidence: {c.get('confidence', 0):.2f}\n"
-                f"  Impact: {c.get('expected_impact', '?')}\n"
-                f"  Preconditions: {c.get('preconditions', [])}\n"
-                f"  Trace hops: {json.dumps(c.get('trace_hops', []))[:500]}\n"
+                f"  Severity: {c.get('severity', '?')}  Confidence: {c.get('confidence', '?')}\n"
+                f"  Description: {c.get('description', c.get('source_reasoning', ''))[:200]}\n"
+                f"  CWE: {c.get('cwe_id', '')}  Auth: {c.get('requires_authentication', False)}\n"
             )
 
             # Collect referenced files for verification
-            for hop in c.get("trace_hops", []):
-                fname = hop.get("file", "")
-                if fname and fname not in code_files:
-                    fp = repo_path / fname
-                    if fp.exists():
-                        try:
-                            content = fp.read_text(errors="replace")
-                            code_files[fname] = content
-                        except Exception:
-                            continue
+            comp = c.get("component", "")
+            for part in comp.split():
+                part = part.strip(".,;:()[]{}'\"")
+                if "." in part and len(part) > 3:
+                    fname = Path(part).name if "/" in part or "\\" in part else part
+                    for fp in repo_path.rglob(f"*{fname}*"):
+                        rp = str(fp.relative_to(repo_path))
+                        if rp not in code_files and fp.exists():
+                            try:
+                                code_files[rp] = fp.read_text(errors="replace")
+                            except Exception:
+                                continue
 
         code_text = ""
         for fname, content in code_files.items():
             code_text += f"\n--- {fname} ---\n{content}\n"
 
-        max_code = 120000
+        max_code = 350000
         if len(code_text) > max_code:
             code_text = code_text[:max_code] + "\n// ... [truncated at context limit]"
 
@@ -184,7 +188,8 @@ def run(
                 if 0 <= c_idx < len(deduped):
                     original = deduped[c_idx]
                     v["original_component"] = original.get("component", "")
-                    v["original_confidence"] = original.get("confidence", 0)
+                    v["original_confidence"] = str(original.get("confidence", ""))
+                    v["original_severity"] = str(original.get("severity", ""))
                     v["_fuzz_pass"] = original.get("_pass", 0)
 
                 verified.append(v)
