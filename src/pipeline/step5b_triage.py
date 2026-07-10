@@ -16,9 +16,13 @@ from typing import Any
 
 from src.llm.client import LLMClient
 from src.llm.prompts import GUARD_PREAMBLE
+from src.config import config
 from src.utils.logger import get_logger
 
 logger = get_logger()
+
+_context = config.get("server.context_length", 49152)
+MAX_CODE = max(30000, (_context - 12000) * 4)
 
 TRIAGE_PROMPT = """You are a skeptical vulnerability verifier. Your default position: DISTRUST every claim.
 The fuzzer that found these is known to hallucinate. Your job is to determine what's REAL.
@@ -164,7 +168,7 @@ def run(
         for fname, content in code_files.items():
             code_text += f"\n--- {fname} ---\n{content}\n"
 
-        max_code = 350000
+        max_code = MAX_CODE
         if len(code_text) > max_code:
             code_text = code_text[:max_code] + "\n// ... [truncated at context limit]"
 

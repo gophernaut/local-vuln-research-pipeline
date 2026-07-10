@@ -22,7 +22,8 @@ from src.utils.logger import get_logger
 
 logger = get_logger()
 
-MAX_CODE_CHARS_PER_PASS = 400000
+_context = config.get("server.context_length", 49152)
+MAX_CODE_CHARS_PER_PASS = max(30000, (_context - 10000) * 4)
 
 
 def run(

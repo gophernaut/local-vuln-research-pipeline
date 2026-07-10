@@ -18,6 +18,9 @@ from src.utils.logger import get_logger
 
 logger = get_logger()
 
+_context = config.get("server.context_length", 49152)
+MAX_CODE = max(50000, (_context - 12000) * 4)
+
 MAX_ITERATIONS = 5
 SKIP_DIRS = {"node_modules", ".git", "__pycache__", ".venv", "venv",
               "target", "build", "dist", "vendor", ".next", ".nuxt",
@@ -269,7 +272,7 @@ def _read_files(paths: list[Path], repo_root: Path, loaded: set[str]) -> dict[st
     code_files: dict[str, str] = {}
     total = 0
     for f in paths:
-        if total > 350000:
+        if total > MAX_CODE:
             break
         rel = str(f.relative_to(repo_root))
         if rel in loaded:

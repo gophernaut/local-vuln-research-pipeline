@@ -1,46 +1,41 @@
 # Local Vuln Research System
 
-LLM-driven exhaustive vulnerability research pipeline using a local uncensored MoE model. Not a SAST tool — the LLM is the primary analyst, every single source file is fed to the model through dynamic context-budgeted passes. N-pass fuzzing architecture adapted from Hacker House's inference fuzzing methodology.
+LLM-driven exhaustive vulnerability research pipeline using a local code-specialized model. Not a SAST — the LLM reviews every source file with short, focused prompts in a 3-stage pipeline validated by [Project Black's research](https://projectblack.io/blog/local-ai-for-cyber-security/). The approach has found real 0-days in production codebases.
 
 ## Architecture
 
 ```
 [Target Repo]
     |
-Step 0  ─ Fingerprint + SBOM              (deterministic, 100% of files)
-Step 1  ─ Classify target                 (17+ target types, dual-language detection)
+Step 0  ─ Fingerprint + SBOM              (deterministic, full file inventory)
+Step 1  ─ Classify target                 (17+ types, dual-language detection)
 Step 2  ─ Dependency vuln scan            (NVD + EPSS/KEV ranked)
-Step 2b ─ Secrets scan                    (gitleaks rules, all text files)
-Step 3  ─ Static analysis (signal boost)  (Semgrep + sink finder + taint flow, 11 languages, full file inventory)
-Step 4  ─ Threat model + CVE catalog      (1 LLM pass + product-specific CVE search, coverage plan for all files)
-Step 5  ─ N-pass exhaustive fuzz          (EVERY file, dynamic batch packing, follow-up passes for incomplete analyses)
-Step 5b ─ Triage                          (5-step skeptical verification: read→trace→check→assess→evidence)
-Step 6  ─ Iterative deep trace            (exact referenced files loaded first, per-hyp checkpoint, up to 5 iterations)
-Step 7  ─ Validation + chain synthesis    (12 filters + LLM chains medium into critical)
+Step 2b ─ Secrets scan                    (gitleaks rules)
+Step 3  ─ Static analysis                 (Semgrep + 200 sink patterns + taint flow, 11 languages)
+Step 4  ─ Threat model + CVE catalog      (1 LLM pass, product-specific CVE search, coverage plan)
+Step 5  ─ Exhaustive 3-stage fuzz         (per-file: pattern scan → reachability → document)
+Step 5b ─ Triage                          (skeptic independent verification against source)
+Step 6  ─ Iterative deep trace            (exact file loading, per-hyp checkpoint)
+Step 7  ─ Validation + chain synthesis    (12 filters + LLM chain synthesis)
 Step 8  ─ Anomaly check                   (prompt injection detection)
-Step 9  ─ Report + runnable PoC           (root cause, exploit path, steps, impact, remediation)
+Step 9  ─ Report + PoC                    (root cause, exploit path, remediation)
     |
-Output: All verified findings with source-reasoned evidence
+Output: Verified findings with source-reasoned evidence
 ```
 
-**Key differentiator from SAST**: Steps 4-9 are LLM-driven. Step 5 runs exhaustive passes — every non-test source file gets its own clean-context review. No sampling, no early termination. Each pass gets fresh context, anchors on different files, and explores different attack surfaces. Step 5b independently verifies every claim against actual source code with a 5-step methodology. Every finding includes concrete source reasoning with quoted vulnerable lines.
+**Validated by Project Black research**: The architecture mirrors the approach that found 0-days in PHPIPAM and myVesta — one focused file batch per pass, short specific prompts, simple tasks the model can handle, complex reasoning deferred to triage/deep-trace stages.
 
-## Language & Target Coverage
+### Step 5 — 3-Stage File-by-File Scan
 
-| Language | Sinks | Entry Points |
-|----------|-------|-------------|
-| Python | 20 patterns | 14 source types |
-| JavaScript/TS | 11 | 6 source types |
-| Java | 12 | 9 source types |
-| C# | 21 | 13 source types |
-| C/C++ | 12 | 17 source types (syscall, ioctl, exported API, kernel) |
-| Go | 9 | 10 source types |
-| Rust | 9 | 12 source types (unsafe, FFI) |
-| PHP | 19 | 14 source types |
-| Ruby | 7 | 10 source types |
-| PowerShell | 17 | 16 source types (param, args, cmdlet, COM) |
+Each batch of files goes through 3 focused stages:
 
-**Target classifications**: kernel, browser/sandbox, PowerShell (dual-language C# + PS detection), AI/ML framework, compiler, embedded/IoT, native C/C++ library, distributed system, container runtime, CLI tool, Java, .NET, web app, IDE/editor, database, protocol handler, general application.
+| Stage | Task | Prompt complexity |
+|-------|------|------------------|
+| 1. Pattern scan | Find dangerous calls: exec, Process.Start, AddScript, Path.Combine(user), deserialization, SSRF, secrets | ~10 lines |
+| 2. Reachability | For each pattern: can a low-privileged attacker reach it? Check auth, validators, sanitizers | ~12 lines |
+| 3. Document | Write structured finding: class, entry point, severity, confidence | ~8 lines |
+
+Each prompt is short enough for any model to handle reliably. No 120-line monster prompts.
 
 ## Hardware
 
@@ -48,59 +43,56 @@ Output: All verified findings with source-reasoned evidence
 - GPU: RTX 4070 Ti SUPER (16GB VRAM)
 - CPU: Ryzen 7 7700 (8C/16T)
 - RAM: 32GB DDR5 6000MHz
-- Model: Qwen3.6-35B-A3B IQ3_M (15GB, fits VRAM fully)
-- Performance: 39 tok/s, 100% JSON compliance, 131K context usable
-- Server: llama.cpp with `--jinja` (Qwen chat template), flash attention, Q4 KV cache
+- Model: Qwen2.5-Coder-7B-Abliterated Q6_K (7B dense, 6.25GB)
+- Draft model: Qwen2.5-Coder-0.5B Q4_K_M (~400MB) for speculative decoding
+- Performance: 40-60 tok/s base, **60-90 effective tok/s** with speculative decoding
+- Context: 131K tokens (6.25GB model leaves 9.75GB free for KV cache)
+- Server: llama.cpp with `--jinja`, flash attention, Q4 KV cache
 
 ## Quick Start
 
 ### 1. Prerequisites
-```
+```powershell
 winget install llama.cpp      # Windows
 brew install llama.cpp         # macOS / Linux
+pip install -r requirements.txt
 pip install huggingface_hub
 ```
 
-### 2. Download model
-```
-huggingface-cli download HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive \
-  Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ3_M.gguf \
-  --local-dir models/
+### 2. Download models
+```powershell
+# Main model: Qwen2.5-Coder-7B-Abliterated Q6_K (6.25 GB)
+huggingface-cli download bartowski/Qwen2.5-Coder-7B-Instruct-abliterated-GGUF `
+  Qwen2.5-Coder-7B-Instruct-abliterated-Q6_K.gguf --local-dir models/
+
+# Draft model: Qwen2.5-Coder-0.5B Q4_K_M (377 MB)
+huggingface-cli download bartowski/Qwen2.5-Coder-0.5B-Instruct-abliterated-GGUF `
+  Qwen2.5-Coder-0.5B-Instruct-abliterated-Q4_K_M.gguf --local-dir models/
 ```
 
-| Quant | Size | VRAM |
-|-------|------|------|
-| `IQ3_M` | 15 GB | 16GB — full GPU fit |
-| `IQ4_XS` | 19 GB | 24GB |
-| `Q4_K_M` | 21 GB | 32GB |
-
-### 3. Install dependencies
-```
-pip install -r requirements.txt
-```
-
-### 4. Start model server
-```
+### 3. Start model server
+```powershell
 python start_server.py
 ```
+Auto-detects draft model and enables speculative decoding. Use `--no-speculative` to disable.
 
-### 5. Get free NVD API key
+```powershell
+# Custom options
+python start_server.py --context 65536 --threads 4 --port 9090
+```
+
+### 4. Get free NVD API key
 https://nvd.nist.gov/developers/request-an-api-key (30 seconds)
 
-### 6. Download CVE database
+### 5. Download CVE database
 ```powershell
 $env:NVD_API_KEY="your-key-here"
 python -m src.main update-cve
 ```
-~45 min with API key. 364K+ CVEs with EPSS + KEV.
+~45 min. 364K+ CVEs with EPSS + KEV, product-specific search.
 
-### 7. Benchmark (optional)
-```
-python run_benchmark.py
-```
-
-### 8. Audit
-```
+### 6. Audit
+```powershell
 python run_audit.py /path/to/target-repo
 python run_audit.py /path/to/target-repo --resume   # resume from checkpoint
 ```
@@ -109,91 +101,60 @@ python run_audit.py /path/to/target-repo --resume   # resume from checkpoint
 
 ## Pipeline Deep Dive
 
-### Step 0 — Fingerprinting
+### Steps 0-3: Deterministic Foundation
 
-Detects languages, frameworks, build systems, and architecture. Framework detection scans only manifest/config files (`.csproj`, `package.json`, etc.) — not every source file — to avoid false signals from test fixtures and comments. Dual-language repos (e.g., C# + PowerShell) are correctly detected.
+**Step 0 — Fingerprinting**: Detects languages, frameworks, build systems. Framework detection scans only manifest/config files (not every source file) and excludes test directories to avoid false signals.
 
-### Step 1 — Classification
+**Step 1 — Classification**: 17 target types. Dual-language detection handles repos like PowerShell (C# + PS). Specialized types match before generic types.
 
-17 target types with ordered rule matching. Dual-language detection handles repos where the primary language is C# but the codebase is fundamentally PowerShell (detected via `System.Management.Automation`, `.ps1`/`.psm1` counts, Cmdlet keywords). Classification order: specialized types (kernel, browser, PowerShell) match before generic types (.NET, web app).
+**Step 3 — Static Analysis**: Full file inventory (not capped at 50 files). Semgrep + 200+ sink patterns + 50+ taint flow sources across 11 languages. Serves as signal boost, not gate — zero findings does not block the pipeline.
 
-### Step 3 — Static Analysis (Signal Boost, Not Gate)
+### Step 4: Threat Model + CVE Catalog
 
-Runs all deterministic analyzers in parallel. **Full file inventory** — every source file is collected (not just top 50). Zero taint flows does NOT block the pipeline — the LLM gets the full codebase overview and hunts independently.
+One LLM pass builds the attack surface map: entry points, trust boundaries, sink inventory, data flows. CVE catalog uses **product-specific searches** — PowerShell repos get PowerShell CVEs, .NET gets deserialization CVEs. Coverage plan includes ALL non-test source files, ranked by priority (entry points > sink-heavy > remaining). Robust static analysis fallback when LLM call fails.
 
-### Step 4 — Threat Model + CVE Catalog (1 Pass)
+### Step 5: Exhaustive 3-Stage Fuzz
 
-One careful LLM pass builds the attack surface map that every fuzz pass consults:
-- Entry point inventory (every externally reachable route, CLI arg, file parse, IPC handler)
-- Trust boundaries (where data crosses privilege levels)
-- Sink inventory (dangerous operations mapped to file:line, organized by category)
-- Coverage plan (ALL non-test source files, ranked by priority: entry points > sink-heavy > remaining)
-- CVE catalog with **product-specific searches** — PowerShell repos get PowerShell CVEs, .NET gets deserialization CVEs, kernel gets LPE/driver CVEs
+**Every non-test source file** goes through 3 focused stages. No sampling, no shortcuts.
 
-If the LLM threat model fails, a robust static analysis fallback builds the coverage plan from sink matches.
+**Stage 1 — Pattern Scan**: "Find these 9 dangerous patterns: command injection, path traversal, code injection, deserialization, auth bypass, SSRF, hardcoded secrets, race conditions, info leak." Simple pattern matching — any model handles this.
 
-**Test directories filtered out** of the coverage plan — `test/`, `tests/`, `spec/`, `fixtures/`, `mocks/`, `benchmarks/`.
+**Stage 2 — Reachability Filter**: "For each pattern, can a low-privileged attacker reach it? Check auth guards, input validators, sanitizers." Drops unreachable patterns before they waste downstream resources.
 
-### Step 5 — N-Pass Exhaustive Fuzz Audit
+**Stage 3 — Document**: "Write each finding with class, entry point, severity, confidence." Structured JSON output.
 
-**Every single non-test source file** is fed to the LLM. No sampling, no early termination.
+Each stage has a **8-12 line prompt** — short enough that even smaller models respond reliably. The blog research confirmed: "once pointed at the correct file, almost every model identified the vulnerability immediately." Complex multi-hop reasoning is deferred to Steps 5b/6/7.
 
-**Dynamic batch packing**: files are packed greedily into each pass's 60K char context budget. Large files get a dedicated pass; small files get bundled 8-15 per pass. Priority ordering ensures sink-heavy and entry-point files are audited first.
+**Dynamic batch packing**: Files are greedily packed into 400K char context budget (~100K tokens). Large files get dedicated passes; small files bundle 10-20 per pass. Per-batch checkpointing for resume.
 
-**Follow-up passes**: if the LLM flags files as `files_fully_analyzed: false`, they're re-scheduled for a second pass with a more aggressive prompt.
+### Step 5b: Triage
 
-**Source reasoning required**: every finding must include `source_reasoning` — concrete code evidence, quoted vulnerable lines, exploit scenario, and explanation of why existing mitigations fail. Generic descriptions like "unsanitized input" are rejected.
+5-step skeptical verification: Read actual code → trace independently → check all mitigations → assess honestly → provide evidence. Full source files loaded. Every kept finding requires concrete source reasoning.
 
-**Per-pass checkpointing**: progress saved after every pass. Power cutoff? Resume from exact pass number with `--resume`.
+### Steps 6-7: Deep Trace + Validation
 
-**Prompt quality**: the fuzz prompt is ~120 lines of structured guidance covering:
-- 10 vulnerability classes with specific API examples per language
-- 8-step per-file analysis methodology (find sinks → trace backwards → check validators → bypass → indirect flows → encoding tricks → type confusion)
-- Confidence grading rubric (0.9+ = exact exploit, 0.7 = likely, 0.5 = suspicious pattern)
-- CVE pattern matching against the catalog
-
-### Step 5b — Triage
-
-5-step skeptical verification methodology:
-1. **Read the actual code** — open file:line, confirm it exists and matches the claim
-2. **Trace the data flow independently** — don't trust the candidate's trace hops
-3. **Check every mitigation** — validation, sanitization, access control, parameterization, error handling, bounds, canonicalization
-4. **Assess exploitability honestly** — external vs local, full vs partial control, realistic preconditions
-5. **Provide evidence** — quoted lines, independent trace, why mitigations fail, suggested fix
-
-Full source files loaded (no truncation). Token budget: 4096.
-
-### Step 6 — Iterative Deep Trace
-
-Per-hypothesis checkpointing with methodology-specific tracing. **Fixed file loading**: exact referenced files from the hypothesis are loaded first (component name → rglob for exact file → trace hop files → sink files), not a random sample of inventory files. LLM requests files mid-trace — up to 5 iterations. Full source files, no truncation. Token budget: 4096.
-
-### Step 7 — Validation + Chain Synthesis
-
-12 filters: Precondition Power Test, Reachability Gate, Circular Threat, Trusted Input Reclass, DoS Exclusion, AI Slop Check, and 6 more. LLM-driven chain synthesis: can medium findings chain into critical?
+Exact referenced files loaded first (component → rglob → trace hops → sink files). LLM requests files mid-trace (up to 5 iterations). 12 validation filters + LLM chain synthesis.
 
 ---
 
-## Time Budget (Exhaustive Mode)
+## Time Budget (7B Dense + Speculative Decoding)
 
-| Repo Size | Files in Plan | Est. Passes | Est. Time |
+| Repo Size | Files in Plan | Est. Batches | Est. Time |
 |-----------|---------------|-------------|-----------|
-| Small (~200 files) | ~150 | ~20 | ~3-4 min |
-| Medium (~800 files) | ~600 | ~80 | ~12-15 min |
-| Large (~2000 files) | ~1400 | ~175 | ~25-30 min |
-| Very Large (~5000 files) | ~3500 | ~440 | ~60-75 min |
-| Kernel (28M lines) | ~8000 | ~1000 | ~4-6 hours |
+| Small (~200 files) | ~150 | ~25 | ~8-12 min |
+| Medium (~800 files) | ~600 | ~100 | ~30-50 min |
+| Large (~2000 files) | ~1400 | ~230 | ~70-120 min |
+| Very Large (~5000 files) | ~3500 | ~580 | ~3-5 hours |
 
-Time scales linearly with repo size. All times assume 39 tok/s throughput. Checkpoint/resume supported at every pass.
+Each batch = 3 LLM calls (pattern + reachability + document). Time scales linearly. Checkpoint/resume at every batch.
 
 ## Checkpointing
 
-Power cut mid-fuzz? Resume from last saved pass. Each pass is independent — zero context dependency between passes.
-
 ```
 data/checkpoints/<hash>/
-├── progress.md              Human-readable: pass 87/175, 23 candidates, 5 verified
-├── fuzz_progress.json       Coverage tracker + accumulated candidates + files needing follow-up
-├── fuzz_candidates.json     All raw candidates from fuzz passes  
+├── progress.md              Human-readable: batch 87/230, 23 candidates
+├── fuzz_progress.json       Coverage tracker + accumulated candidates
+├── fuzz_candidates.json     All raw candidates from fuzz passes
 ├── triaged.json             Post-triage verified findings
 ├── triage_verified.json     Triage checkpoint
 ├── trace_hyp_0.json         Per-hypothesis deep trace checkpoints
@@ -208,36 +169,32 @@ data/checkpoints/<hash>/
 
 | Command | Description |
 |---------|-------------|
-| `python start_server.py` | Start llama-server |
-| `python run_benchmark.py` | Run model benchmark |
-| `python run_audit.py <path>` | Full audit pipeline (exhaustive mode) |
+| `python start_server.py` | Start llama-server with speculative decoding |
+| `python start_server.py --no-speculative` | Start without draft model |
+| `python run_audit.py <path>` | Full audit (exhaustive 3-stage fuzz) |
 | `python run_audit.py <path> --resume` | Resume from checkpoint |
 | `python -m src.main setup` | Print setup instructions |
 | `python -m src.main update-cve` | Download/build CVE database |
-| `python -m src.main eval` | Run evaluation harness |
-
-## CVE Database
-
-NVD (364K+) + EPSS (exploit probability) + CISA KEV (actively exploited). SQLite with FTS5 + 384-dim embeddings. Hybrid ranking: KEV > EPSS > CVSS. Product-specific CVE searches for PowerShell, .NET, and other target types.
 
 ## Configuration
 
 ```yaml
 model:
-  quant: "IQ3_M"
-  file: "models/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive-IQ3_M.gguf"
+  name: "Qwen2.5-Coder-7B-Abliterated"
+  file: "models/Qwen2.5-Coder-7B-Instruct-abliterated-Q6_K.gguf"
+  draft_file: "models/Qwen2.5-Coder-0.5B-Instruct-abliterated-Q4_K_M.gguf"
 
 server:
-  context_length: AUTO   # Benchmark: 131K
+  context_length: 131072
   flash_attn: true
+  cache_type_k: "q4_0"
+  cache_type_v: "q4_0"
+  speculative:
+    enabled: true
+    draft_n_max: 16
 
 pipeline:
-  max_hypotheses: AUTO
   self_consistency_runs: 3
-
-thresholds:
-  hypothesis_confidence_cutoff: AUTO
-  epss_min_score: 0.01
 
 knowledge:
   sources: [nvd, epss, kev]
@@ -248,59 +205,52 @@ knowledge:
 ## File Structure
 
 ```
-  models/                              GGUF model files
+  models/                              GGUF model files (main + draft)
   src/
     orchestrator.py                    Master pipeline + checkpointing
     pipeline/
-      step0_fingerprint.py             Fingerprinting + SBOM (manifest-only framework detection)
-      step1_classify.py                17+ target types + dual-language detection
+      step0_fingerprint.py             Fingerprinting (manifest-only framework detect)
+      step1_classify.py                17+ types + dual-language
       step2_deps.py                    Dependency vuln scan
       step2_secrets.py                 Secrets scanner
       step3_static.py                  Static analysis (full file inventory)
-      step4_threat_model.py            Threat model + product-specific CVE catalog
-      step5_fuzz.py                    N-pass exhaustive fuzz (dynamic batch packing)
-      step5_hypotheses.py              Hypothesis generation from signals
-      step5b_triage.py                 5-step skeptical candidate verification
-      step6_deep_trace.py              Iterative deep trace with exact file loading
-      step7_validate.py                Filters + LLM chain synthesis
+      step4_threat_model.py            Threat model + product-specific CVEs
+      step5_fuzz.py                    3-stage exhaustive fuzz (pattern→reach→document)
+      step5_hypotheses.py              Hypothesis generation
+      step5b_triage.py                 5-step skeptical verification
+      step6_deep_trace.py              Iterative deep trace + exact file loading
+      step7_validate.py                Filters + chain synthesis
       step8_anomaly.py                 Injection detection
       step9_report.py                  Report + PoC
     analysis/
       sink_finder.py                   200+ patterns, 11 languages
-      data_flow.py                     50+ source patterns, all languages
-      semgrep_runner.py, secrets_scanner.py, ast_parser.py, call_graph.py
+      data_flow.py                     50+ source patterns
     knowledge/
       downloader.py, importer.py, cve_db.py, embeddings.py, epss.py, kev.py, sbom.py
     llm/
       client.py, prompts.py, context.py, guard.py
-    eval/
-      harness.py, datasets.py, metrics.py, calibration.py
-    benchmark/
-      runner.py, report.py
   data/
-    cve/nvd.sqlite                     Unified CVE database (364K+ CVEs)
-    checkpoints/                       Per-repo audit state + per-hyp trace state
+    cve/nvd.sqlite                     CVE database (364K+)
+    checkpoints/                       Per-repo audit state
   config.yaml, requirements.txt
-  start_server.py, run_benchmark.py, run_audit.py
+  start_server.py, run_audit.py
 ```
 
 ## Design Principles
 
-- **Exhaustive coverage**: Every non-test source file is audited. No sampling. No shortcuts.
-- **Source-reasoned findings**: Every vulnerability claim must cite exact file:line and include concrete code evidence. Generic descriptions are rejected at triage.
-- **Clean context per pass**: No memory between passes. Each pass walks different attack surface, like a fuzzer randomizing its seed.
-- **Skeptic triage**: The triage step assumes every fuzz candidate is wrong until proven otherwise. Independent trace verification, mitigation checking, honesty about exploitability.
-- **Product-specific CVE intelligence**: Not generic top-10 CVEs. The CVE catalog is targeted to the actual technology stack.
-- **Per-pass resume**: Every pass checkpoints. Resume from exact position after interruption.
-- **Time is not a constraint**: Quality over speed. Every file, every pass, every verification.
+- **Exhaustive coverage**: Every non-test source file is reviewed. No sampling.
+- **Short, focused prompts**: 3-stage approach with 8-12 line prompts per stage. Any model can handle them.
+- **Clean context per batch**: No memory between batches. Each starts fresh.
+- **Skeptic triage**: Every finding is independently verified against source code.
+- **Product-specific intelligence**: CVEs targeted to the actual tech stack, not generic top-10.
+- **Proven methodology**: Architecture validated by Project Black research finding real 0-days.
+- **Local only**: No data leaves your machine. No API costs.
 
-## Caveats
+## References
 
-- Authorized security research only. Confirmation required before every audit.
-- Model quality ceiling: IQ3_M at 3B active params may miss complex multi-hop logic. Higher quants improve reasoning.
-- False positives in fuzz phase are by design. The 5-step triage phase discards them.
-- Local-only model — no data leaves your machine. No API costs.
-- Test directories are excluded from the audit plan. Test code often contains intentional vulnerable patterns (XSS payloads, injection strings) that produce false positives.
+- [Project Black: Local AI for Penetration Testing & Research](https://projectblack.io/blog/local-ai-for-cyber-security/) — validated the file-by-file approach
+- [RAPTOR: Autonomous Offensive/Defensive Research Framework](https://github.com/gadievron/raptor) — validation pipeline inspiration
+- Model: [Qwen2.5-Coder-7B-Abliterated](https://huggingface.co/bartowski/Qwen2.5-Coder-7B-Instruct-abliterated-GGUF)
 
 ## License
 
