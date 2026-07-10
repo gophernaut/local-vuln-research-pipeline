@@ -22,6 +22,9 @@ def main():
     audit.add_argument("repo_path", help="Path to target repository")
     audit.add_argument("--resume", action="store_true", help="Resume from checkpoint")
 
+    estimate = sub.add_parser("estimate", help="Estimate resources needed for a target")
+    estimate.add_argument("repo_path", help="Path to target repository")
+
     args = parser.parse_args()
 
     if args.command == "setup":
@@ -34,6 +37,8 @@ def main():
         _cmd_update_cve()
     elif args.command == "audit":
         _cmd_audit(args.repo_path, args.resume)
+    elif args.command == "estimate":
+        _cmd_estimate(args.repo_path)
 
 
 def _cmd_setup():
@@ -133,6 +138,50 @@ def _cmd_audit(repo_path: str, resume: bool):
                 print(f"\n[+] Report: {report}")
             print(f"\n[+] Checkpoint data: {checkpoint_dir}")
     sys.exit(code)
+
+
+def _cmd_estimate(repo_path: str):
+    from pathlib import Path
+    from src.analysis.scaling import LargeCodebaseAdapter
+
+    target = Path(repo_path).resolve()
+    if not target.exists():
+        print(f"[!] Repository not found: {target}")
+        sys.exit(1)
+
+    print(f"\n=== Scan Estimate: {target} ===\n")
+
+    files = []
+    total_size = 0
+    for f in target.rglob("*"):
+        if f.is_file() and f.suffix:
+            try:
+                size = f.stat().st_size
+                total_size += size
+                files.append(f)
+            except OSError:
+                pass
+
+    size_mb = total_size / (1024 * 1024)
+    file_count = len(files)
+
+    adapter = LargeCodebaseAdapter()
+    config = adapter.get_adaptive_config(size_mb, file_count)
+    resources = adapter.estimate_resources(file_count)
+
+    print(f"Files: {file_count}")
+    print(f"Size: {size_mb:.1f} MB")
+    print(f"Recommended config: {resources['recommended_config']}")
+    print(f"\nEstimated analysis scope:")
+    print(f"  Functions: ~{resources['estimated_functions']:,}")
+    print(f"  Sources: ~{resources['estimated_sources']:,}")
+    print(f"  Sinks: ~{resources['estimated_sinks']:,}")
+    print(f"  Paths: ~{resources['estimated_paths']:,}")
+    print(f"  LLM analysis: ~{resources['estimated_llm_minutes']:.0f} minutes")
+    print(f"\nConfig:")
+    print(f"  Max LLM paths: {config.max_llm_paths}")
+    print(f"  Workers: {config.num_workers}")
+    print(f"  Files per chunk: {config.max_files_per_chunk}")
 
 
 if __name__ == "__main__":

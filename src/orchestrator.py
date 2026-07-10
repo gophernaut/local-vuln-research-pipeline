@@ -73,6 +73,24 @@ class Orchestrator:
         self.progress: dict[str, Any] = {}
         self.state: dict[str, Any] = {}
         self.start_time = time.time()
+        self.scale_config = self._adapt_to_repo_size()
+
+    def _adapt_to_repo_size(self) -> Any:
+        try:
+            from src.analysis.scaling import LargeCodebaseAdapter
+            adapter = LargeCodebaseAdapter()
+            files = list(self.repo_path.rglob("*"))
+            file_count = sum(1 for f in files if f.is_file() and f.suffix)
+            total_size = sum(
+                f.stat().st_size for f in files
+                if f.is_file() and f.suffix
+            ) / (1024 * 1024)
+
+            logger.info(f"Repository size: {file_count} files, {total_size:.1f} MB")
+            return adapter.get_adaptive_config(total_size, file_count)
+        except Exception:
+            from src.analysis.scaling import ScaleConfig
+            return ScaleConfig()
 
     def run(self) -> int:
         print(AUTH_WARNING)
