@@ -32,6 +32,7 @@ STEP_NAMES = {
     4: "Threat Model",
     "4b": "Path Enumeration",
     "4c": "Per-Path LLM Analysis",
+    "4d": "Blind Spot Coverage",
     5: "Memory Corruption Analysis",
     6: "Chain Synthesis",
     7: "Validation",
@@ -41,7 +42,7 @@ STEP_NAMES = {
 
 STEP_ORDER = {
     "0": 0, "1": 1, "2": 2, "2b": 3, "3": 4, "3b": 5, "4": 6,
-    "4b": 7, "4c": 8, "5": 9, "6": 10, "7": 11, "8": 12, "9": 13,
+    "4b": 7, "4c": 8, "4d": 9, "5": 10, "6": 11, "7": 12, "8": 13, "9": 14,
 }
 
 
@@ -125,6 +126,7 @@ class Orchestrator:
             (4, self._step4, ["fingerprint", "classification", "static_analysis"], "threat_model.json"),
             ("4b", self._step4b, ["code_graph"], "path_enum.json"),
             ("4c", self._step4c, ["path_enum", "threat_model"], "path_analysis.json"),
+            ("4d", self._step4d, ["path_analysis", "threat_model", "static_analysis"], "blindspot_findings.json"),
             (5, self._step5_memory, ["code_graph"], "memory_findings.json"),
             (6, self._step6_chains, ["path_analysis"], "chains.json"),
             (7, self._step7_validate, ["path_analysis", "memory_findings"], "validated_findings.json"),
@@ -254,7 +256,7 @@ class Orchestrator:
             "|------|------|--------|----------|",
         ]
 
-        for sn in ["0", "1", "2", "2b", "3", "3b", "4", "4b", "4c", "5", "6", "7", "8", "9"]:
+        for sn in ["0", "1", "2", "2b", "3", "3b", "4", "4b", "4c", "4d", "5", "6", "7", "8", "9"]:
             step = steps.get(sn, {})
             name = step.get("name", STEP_NAMES.get(sn, "?"))
             status = step.get("status", "pending")
@@ -330,6 +332,14 @@ class Orchestrator:
         threat_model = self.state.get("threat_model", {})
         cve_catalog = threat_model.get("cve_catalog", {})
         return run(self.repo_path, self.state.get("path_enum", {}), cve_catalog=cve_catalog)
+
+    def _step4d(self):
+        from src.pipeline.step4d_blindspot import run
+        threat_model = self.state.get("threat_model", {})
+        path_analysis = self.state.get("path_analysis", {})
+        static_analysis = self.state.get("static_analysis", {})
+        file_inventory = static_analysis.get("file_inventory", {})
+        return run(self.repo_path, threat_model, path_analysis, file_inventory)
 
     def _step5_memory(self):
         code_graph = self.state.get("code_graph", {})

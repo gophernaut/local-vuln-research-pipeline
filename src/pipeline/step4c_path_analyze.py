@@ -94,11 +94,17 @@ def run(repo_path: Path, path_data: dict, cve_catalog: dict | None = None) -> di
     )
 
     verified = sum(1 for r in results if r.verdict == "VERIFIED_EXPLOITABLE")
-    blocked = sum(1 for r in results if r.verdict == "BLOCKED")
+    auto_classified = sum(1 for r in results if r.analysis_source == "auto")
+    llm_validated = sum(1 for r in results if r.analysis_source == "llm")
+    auto_blocked = sum(1 for r in results if r.verdict == "BLOCKED" and r.analysis_source == "auto")
+    llm_blocked = sum(1 for r in results if r.verdict == "BLOCKED" and r.analysis_source == "llm")
+    llm_exploitable = sum(1 for r in results if r.verdict == "VERIFIED_EXPLOITABLE" and r.analysis_source == "llm")
     uncertain = sum(1 for r in results if r.verdict == "uncertain")
+
     logger.info(
-        f"  LLM analysis: {verified} VERIFIED EXPLOITABLE, {blocked} BLOCKED, "
-        f"{uncertain} UNCERTAIN"
+        f"  Coverage: {len(results)} unique paths ({auto_classified} auto, {llm_validated} LLM) — "
+        f"{verified} exploitable, "
+        f"{auto_blocked + llm_blocked} blocked, {uncertain} uncertain"
     )
 
     return {
@@ -125,8 +131,13 @@ def run(repo_path: Path, path_data: dict, cve_catalog: dict | None = None) -> di
         ],
         "summary": {
             "analyzed": len(results),
-            "verified_exploitable": verified,
-            "blocked": blocked,
+            "auto_classified": auto_classified,
+            "llm_validated": llm_validated,
+            "verified_exploitable": verified + llm_exploitable,
+            "llm_exploitable": llm_exploitable,
+            "blocked": auto_blocked + llm_blocked,
+            "auto_blocked": auto_blocked,
+            "llm_blocked": llm_blocked,
             "uncertain": uncertain,
         },
         "elapsed_seconds": time.time() - t0,

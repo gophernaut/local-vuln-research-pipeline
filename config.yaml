@@ -37,7 +37,7 @@ pipeline:
   parallel_analyzers: 16
   max_path_depth: 8
   max_paths_per_pair: 20
-  max_llm_paths: 500
+  max_llm_paths: 0
   llm_temperature: 0.3
 
 scaling:

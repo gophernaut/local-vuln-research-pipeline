@@ -7,7 +7,9 @@ For each path produced by the path enumerator, builds a focused prompt with:
 - Sanitizers found on the path
 - Question: is this path actually exploitable?
 
-The LLM returns: verdict (exploitable/blocked/uncertain), reasoning, exploit scenario.
+Paths are deduplicated by unique (source, sink) pairs. Clear-cut cases
+(sanitizer-blocked, unreachable) get deterministic verdicts without LLM.
+Ambiguous paths go to the LLM for reasoning. No path is skipped.
 """
 from __future__ import annotations
 
@@ -30,8 +32,28 @@ from src.utils.logger import get_logger
 logger = get_logger()
 
 
+@dataclass
+class PathAnalysisResult:
+    path_id: str
+    verdict: str
+    confidence: float
+    reasoning: str
+    exploit_scenario: str
+    severity: str
+    cwe_id: str
+    entry_point: str
+    sink: str
+    file_path: str
+    source_line: int
+    sink_line: int
+    functions_on_path: list[str]
+    sanitizers_seen: list[str]
+    tainted_vars: list[str]
+    poc_idea: str = ""
+    analysis_source: str = ""
+
+
 def _build_cve_context(cve_catalog: dict | None, cwe_id: str, sink_category: str) -> str:
-    """Build a CVE context snippet matching this path's sink category / CWE."""
     if not cve_catalog:
         return ""
 
@@ -68,26 +90,6 @@ def _build_cve_context(cve_catalog: dict | None, cwe_id: str, sink_category: str
     lines.append("")
 
     return "\n".join(lines)
-
-
-@dataclass
-class PathAnalysisResult:
-    path_id: str
-    verdict: str
-    confidence: float
-    reasoning: str
-    exploit_scenario: str
-    severity: str
-    cwe_id: str
-    entry_point: str
-    sink: str
-    file_path: str
-    source_line: int
-    sink_line: int
-    functions_on_path: list[str]
-    sanitizers_seen: list[str]
-    tainted_vars: list[str]
-    poc_idea: str = ""
 
 
 def _build_path_prompt(path: ExploitPath, function_sources: dict[str, str],
@@ -193,29 +195,130 @@ def _load_function_sources(paths: list[ExploitPath], repo_path: Path) -> dict[st
     return function_sources
 
 
+def _make_path_result(path: ExploitPath, verdict: str, confidence: float,
+                      reasoning: str, exploit_scenario: str,
+                      severity: str, poc_idea: str,
+                      analysis_source: str = "") -> PathAnalysisResult:
+    return PathAnalysisResult(
+        path_id=path.path_id,
+        verdict=verdict,
+        confidence=confidence,
+        reasoning=reasoning,
+        exploit_scenario=exploit_scenario,
+        severity=severity,
+        cwe_id=path.sink.cwe_id,
+        entry_point=f"{path.source.file}:{path.source.line} ({path.source.source_type})",
+        sink=f"{path.sink.file}:{path.sink.line} ({path.sink.category})",
+        file_path=path.sink.file,
+        source_line=path.source.line,
+        sink_line=path.sink.line,
+        functions_on_path=[s.function_name for s in path.steps],
+        sanitizers_seen=[s.function_name for s in path.sanitizers_on_path],
+        tainted_vars=list(path.steps[-1].tainted_vars) if path.steps else [],
+        poc_idea=poc_idea,
+        analysis_source=analysis_source,
+    )
+
+
+def _has_real_function_path(steps) -> bool:
+    return any(s.function_name and s.function_name != "<module-level>" for s in steps)
+
+
+def _has_sink_reach(path: ExploitPath) -> bool:
+    return any(s.sink_reach for s in path.steps)
+
+
 def analyze_paths_with_llm(
     paths: list[ExploitPath],
     repo_path: Path,
-    max_paths: int = 500,
+    max_paths: int = 0,
     temperature: float = 0.3,
     cve_catalog: dict | None = None,
 ) -> list[PathAnalysisResult]:
-    logger.info(f"Analyzing {len(paths)} paths with LLM (max {max_paths})")
+    logger.info(f"Analyzing {len(paths)} enumerated paths")
 
-    if len(paths) > max_paths:
-        priority_paths = sorted(
-            paths,
-            key=lambda p: (p.sink.severity == "CRITICAL", p.sink.severity == "HIGH",
-                          len(p.sanitizers_on_path) == 0),
-            reverse=True,
-        )[:max_paths]
-    else:
-        priority_paths = paths
+    sev_value = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
 
-    function_sources = _load_function_sources(priority_paths, repo_path)
+    deterministic_results: list[PathAnalysisResult] = []
+    llm_candidates: list[ExploitPath] = []
+
+    seen_combos = set()
+    for path in paths:
+        if not path.is_exploitable:
+            deterministic_results.append(_make_path_result(
+                path, "BLOCKED", 0.95,
+                "Path marked non-exploitable by static analysis — sink not in last "
+                "function on path, or no reachable call graph connection.",
+                "", path.sink.severity, "", "auto",
+            ))
+            continue
+
+        combo_key = (
+            path.source.file, path.source.line,
+            path.sink.file, path.sink.line, path.sink.category,
+            path.is_blocked_by_sanitizer,
+        )
+        if combo_key in seen_combos:
+            continue
+        seen_combos.add(combo_key)
+
+        has_real_path = _has_real_function_path(path.steps)
+        sink_reached = _has_sink_reach(path)
+
+        if path.is_blocked_by_sanitizer:
+            deterministic_results.append(_make_path_result(
+                path, "BLOCKED", 0.90,
+                "Blocked by sanitizer(s) on the path. Taxonomy-matched sanitizer "
+                f"protects against {path.sink.category}.",
+                "", path.sink.severity, "", "auto",
+            ))
+        elif not has_real_path and not sink_reached:
+            conf = 0.30
+            deterministic_results.append(_make_path_result(
+                path, "BLOCKED", conf,
+                "Module-level sink with no function context or taint trace. "
+                "Source and sink may be in the same file but no direct data flow is traceable.",
+                "", path.sink.severity, "", "auto",
+            ))
+        else:
+            llm_candidates.append(path)
+
+    logger.info(f"  Dedup: {len(paths)} raw → {len(seen_combos)} unique (+{len(deterministic_results)} auto-classified, "
+                f"{len(llm_candidates)} need LLM)")
+
+    if max_paths > 0 and len(llm_candidates) > max_paths:
+        logger.warning(f"  {len(llm_candidates)} paths need LLM but max_llm_paths={max_paths}. "
+                       f"Sampling top {max_paths}. Set max_llm_paths: 0 in config.yaml for unlimited.")
+
+        scored = []
+        for p in llm_candidates:
+            sev = sev_value.get(p.sink.severity.upper(), 0)
+            sanitizer_penalty = 0 if len(p.sanitizers_on_path) == 0 else -2
+            scored.append((sev + sanitizer_penalty, p))
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        seen_sinks = set()
+        priority = []
+        for _score, p in scored:
+            sk = f"{p.sink.file}:{p.sink.line}:{p.sink.category}"
+            if sk not in seen_sinks:
+                seen_sinks.add(sk)
+                priority.append(p)
+                if len(priority) >= max_paths:
+                    break
+        remaining = max_paths - len(priority)
+        if remaining > 0:
+            for _score, p in scored:
+                if p not in priority:
+                    priority.append(p)
+                    if len(priority) >= max_paths:
+                        break
+        llm_candidates = priority
+
+    function_sources = _load_function_sources(llm_candidates, repo_path)
 
     client = LLMClient()
-    results = []
+    llm_results = []
 
     system = f"""{GUARD_PREAMBLE}
 
@@ -236,7 +339,7 @@ DECISION CRITERIA:
 Be specific. Cite exact lines. Don't pad with caveats. Make a decision.
 """
 
-    for i, path in enumerate(priority_paths):
+    for i, path in enumerate(llm_candidates):
         if not path.is_exploitable:
             continue
 
@@ -257,23 +360,14 @@ Be specific. Cite exact lines. Don't pad with caveats. Make a decision.
                 elif verdict == "blocked":
                     verdict = "BLOCKED"
 
-                results.append(PathAnalysisResult(
-                    path_id=path.path_id,
-                    verdict=verdict,
-                    confidence=float(result_dict.get("confidence", 0.5)),
-                    reasoning=result_dict.get("reasoning", ""),
-                    exploit_scenario=result_dict.get("exploit_scenario", ""),
-                    severity=result_dict.get("severity", path.sink.severity),
-                    cwe_id=path.sink.cwe_id,
-                    entry_point=f"{path.source.file}:{path.source.line} ({path.source.source_type})",
-                    sink=f"{path.sink.file}:{path.sink.line} ({path.sink.category})",
-                    file_path=path.sink.file,
-                    source_line=path.source.line,
-                    sink_line=path.sink.line,
-                    functions_on_path=[s.function_name for s in path.steps],
-                    sanitizers_seen=[s.function_name for s in path.sanitizers_on_path],
-                    tainted_vars=list(path.steps[-1].tainted_vars) if path.steps else [],
-                    poc_idea=result_dict.get("poc_idea", ""),
+                llm_results.append(_make_path_result(
+                    path, verdict,
+                    float(result_dict.get("confidence", 0.5)),
+                    result_dict.get("reasoning", ""),
+                    result_dict.get("exploit_scenario", ""),
+                    result_dict.get("severity", path.sink.severity),
+                    result_dict.get("poc_idea", ""),
+                    "llm",
                 ))
 
         except Exception as e:
@@ -281,10 +375,21 @@ Be specific. Cite exact lines. Don't pad with caveats. Make a decision.
             continue
 
         if (i + 1) % 50 == 0:
-            logger.info(f"  Analyzed {i + 1}/{len(priority_paths)} paths")
+            logger.info(f"  LLM analyzed {i + 1}/{len(llm_candidates)} paths")
 
-    logger.info(f"LLM analysis complete: {len(results)} paths analyzed")
-    return results
+    all_results = deterministic_results + llm_results
+    verified = sum(1 for r in all_results if r.verdict == "VERIFIED_EXPLOITABLE")
+    auto_blocked = sum(1 for r in deterministic_results if r.verdict == "BLOCKED")
+    llm_blocked = sum(1 for r in llm_results if r.verdict == "BLOCKED")
+    uncertain = sum(1 for r in all_results if r.verdict == "uncertain")
+
+    logger.info(
+        f"  Coverage complete: {len(all_results)} unique paths analyzed "
+        f"({verified} exploitable, {auto_blocked + llm_blocked} blocked "
+        f"[{auto_blocked} auto/{llm_blocked} llm], {uncertain} uncertain)"
+    )
+
+    return all_results
 
 
 def analyze_paths(

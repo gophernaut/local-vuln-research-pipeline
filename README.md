@@ -14,10 +14,14 @@ Finds every valid vulnerability in source code through exhaustive enumeration:
 2. Builds a complete call graph with cross-file imports
 3. Tags every untrusted input source and dangerous operation sink
 4. Enumerates every source-to-sink path through the call graph
-5. Tracks taint through each function on each path
-6. Validates each path with LLM for genuine exploitability
-7. Analyzes memory corruption for C/C++/Rust codebases
-8. Synthesizes multi-step exploit chains
+5. Tracks taint through each function on each path (intra- + inter-procedural)
+6. Cross-references sanitizers against sink categories via normalized taxonomy
+7. Validates ambiguous paths with LLM for genuine exploitability
+8. Auto-classifies clear-cut cases deterministically (sanitizer match → blocked)
+9. Sweeps every file NOT covered by paths with a blind-spot code review (Project Black methodology)
+10. Injects relevant product CVEs into every LLM prompt for pattern matching
+11. Analyzes memory corruption for C/C++/Rust codebases
+12. Synthesizes multi-step exploit chains via networkx transitive closure
 
 Every source (untrusted input entry point) is paired with every compatible sink (dangerous operation) and all call-graph paths between them are analyzed. Nothing is sampled.
 
@@ -36,7 +40,8 @@ Step 3  - Static analysis                 (Semgrep scan + file inventory)
 Step 3b - Code graph construction         (call graph + source/sink/sanitizer tags + memory analysis)
 Step 4  - Threat model + CVE catalog      (1 LLM pass, product-specific CVE search)
 Step 4b - Path enumeration               (exhaustive source-to-sink path discovery + inter-procedural taint)
-Step 4c - Per-path LLM analysis           (exploitability validation, one path at a time)
+Step 4c - Per-path LLM analysis           (exploitability validation, one path at a time + CVE context)
+Step 4d - Blind spot coverage             (file-by-file LLM review of all uncovered source files)
 Step 5  - Memory findings extraction      (results from step 3b's memory analysis)
 Step 6  - Chain synthesis                 (networkx attack graph + transitive closure)
 Step 7  - Validation                      (confidence-based filtering)
@@ -188,17 +193,28 @@ A medium codebase (~800 files) might produce 5,000-50,000 source-to-sink paths. 
 ### Step 4c: Per-Path LLM Analysis
 
 For each enumerated path:
-1. Load the full source of every function on that path (2-8 functions typical)
-2. Construct a focused prompt with source, sink, sanitizers, and complete code
-3. Each LLM call handles ONE path with all the context it needs
+1. Paths are deduplicated by unique (source, sink, category) combination
+2. Clear-cut cases get deterministic verdicts: sanitizer-taxonomy match → auto-BLOCKED, unreachable sink → auto-BLOCKED
+3. Only ambiguous paths go to the LLM (real function chains, taint present, no matching sanitizer)
+4. Every LLM prompt includes relevant CVE examples matching the path's CWE + product stack
+5. No limit by default — `max_llm_paths: 0` means analyze every unique path
 
 The LLM does not discover paths. It analyzes a path the graph already found.
 
-Smart sampling for large codebases: when path count exceeds LLM budget, paths are prioritized by:
-- Severity (CRITICAL first, then HIGH, etc.)
-- Vulnerability class (command execution, deserialization scored higher)
-- Path length (shorter paths prioritized)
-- Sanitizer presence (paths without sanitizers get 1.5x multiplier)
+### Step 4d: Blind Spot Coverage (Project Black Methodology)
+
+Code graph + path enumeration finds every data-flow vulnerability (injection, traversal, SSRF, deserialization). But some vulnerability classes don't follow a source-to-sink model — logic bugs, misconfigurations, auth gaps, weak crypto patterns the sink tagger doesn't recognize.
+
+Step 4d sweeps every source file NOT covered by path analysis, sending batches of 5 files through the LLM with CVE context and the full source code. The LLM reviews each file for:
+- Hardcoded credentials/secrets
+- Weak cryptography/random patterns
+- Auth check gaps and logic bugs
+- Insecure defaults and dangerous configurations
+- Race conditions and TOCTOU
+- Template injection and unsafe native calls
+- Commented-out dangerous code
+
+Between path enumeration (data-flow vulns) and blind-spot coverage (everything else), every line of every source file is reviewed.
 
 ### Step 5: Memory Corruption Analysis
 
@@ -447,6 +463,7 @@ src/
     step4_threat_model.py            Threat model + CVE catalog
     step4b_path_enum.py              Exhaustive source-to-sink path enumeration
     step4c_path_analyze.py           Per-path LLM exploitability validation
+    step4d_blindspot.py              File-by-file blind spot review (Project Black)
     step6_chains.py                  Attack graph + transitive chain synthesis
     step8_anomaly.py                 Prompt injection detection
     step9_report.py                  Exhaustive report with PoCs

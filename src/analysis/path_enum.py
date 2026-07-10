@@ -234,6 +234,8 @@ class PathEnumerator:
 
                         if not sink_func_keys:
                             for source_key in source_func_keys:
+                                if source_file != sink_file:
+                                    continue
                                 if sink.category in ("security_misconfig", "race_condition", "hardcoded_secret"):
                                     exploit_path = ExploitPath(
                                         path_id=f"P{path_id}",
@@ -277,6 +279,8 @@ class PathEnumerator:
             if sink_funcs:
                 continue
             for source in sources:
+                if source.file != sink.file:
+                    continue
                 if not self._is_compatible(source.source_type, sink.category):
                     continue
                 exploit_path = ExploitPath(
