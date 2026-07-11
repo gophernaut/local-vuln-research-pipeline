@@ -1038,14 +1038,17 @@ class ASTParser:
             r"enum\s+(\w+)",
             r"protocol\s+(\w+)",
         ]
+        source_lines = source.split("\n")
         for pattern in patterns:
             for m in re.finditer(pattern, source):
                 class_name = m.group(1)
                 superclass = m.group(2) if m.lastindex and m.lastindex >= 2 else ""
                 line = source[:m.start()].count("\n") + 1
+                line_idx = line - 1
+                end_line = self._find_block_end(source_lines, line_idx, analysis.language)
                 analysis.class_definitions.append(ClassDef(
                     name=class_name, file=analysis.path,
-                    line=line, end_line=line + 20,
+                    line=line, end_line=end_line,
                     superclass=superclass or "",
                 ))
 
@@ -1165,6 +1168,43 @@ class ASTParser:
     def _regex_find(self, text: str, pattern: str) -> list[tuple[int, int]]:
         return [(m.start(), m.end()) for m in re.finditer(pattern, text)]
 
+    def _find_block_end(self, source_lines: list[str], start_line_idx: int,
+                         language: str = "") -> int:
+        """Find the line where a code block ends by tracking brace/end depth.
+        
+        For brace-based languages ({...}): tracks curly brace depth from the
+        start line until a matching closing brace is found.
+        For Ruby (def...end): tracks `do`/`{` → `end`/`}` matching.
+        Falls back to start + 200 if no clear block delimiter is found.
+        """
+        total = len(source_lines)
+        
+        for li in range(start_line_idx, min(start_line_idx + 3, total)):
+            line = source_lines[li]
+            if '{' in line:
+                depth = 0
+                for li2 in range(li, total):
+                    for ch in source_lines[li2]:
+                        if ch == '{':
+                            depth += 1
+                        elif ch == '}':
+                            depth -= 1
+                            if depth == 0:
+                                return li2 + 1
+                return min(start_line_idx + 200, total)
+        
+        if language == "ruby":
+            for li in range(start_line_idx, total):
+                stripped = source_lines[li].strip()
+                if re.match(r'\bend\b', stripped):
+                    return li + 1
+            return min(start_line_idx + 200, total)
+        
+        if language in ("scala",):
+            return min(start_line_idx + 20, total)
+        
+        return min(start_line_idx + 200, total)
+
     def _parse_with_regex(self, source: str, path: str, language: str) -> FileAnalysis:
         analysis = FileAnalysis(path=path, language=language, lines=source.count("\n"), raw_source=source)
 
@@ -1179,7 +1219,8 @@ class ASTParser:
                 r"protected\s+function\s+(\w+)\s*\(",
             ],
             "powershell": [
-                r"function\s+([\w-]+)\s*(?:\{|$)",
+                r"(?:function|filter|workflow)\s+([\w-]+)\s*(?:\{|$)",
+                r"class\s+(\w+)\s*\{",
             ],
             "swift": [
                 r"func\s+(\w+)\s*\(",
@@ -1205,12 +1246,14 @@ class ASTParser:
             ],
         }
 
+        source_lines = source.split("\n")
         func_patterns = lang_func_patterns.get(language, [])
         for pattern in func_patterns:
             for m in re.finditer(pattern, source):
                 func_name = m.group(1)
                 line = source[:m.start()].count("\n") + 1
-                end_line = line + 20
+                line_idx = line - 1
+                end_line = self._find_block_end(source_lines, line_idx, language)
                 analysis.functions.append(FunctionDef(
                     name=func_name, file=path, line=line, end_line=end_line,
                 ))
@@ -1229,6 +1272,10 @@ class ASTParser:
             "powershell": [
                 (r"function\s+\w+-\w+", "CMDLET"),
                 (r"\bparam\s*\(", "PARAM_BLOCK"),
+                (r"\bBegin\s*\{", "BEGIN_BLOCK"),
+                (r"\bProcess\s*\{", "PROCESS_BLOCK"),
+                (r"\bEnd\s*\{", "END_BLOCK"),
+                (r"\bDynamicParam\s*\{", "DYNAMIC_PARAM"),
             ],
             "swift": [
                 (r"func\s+main\s*\(", "MAIN_ENTRY"),

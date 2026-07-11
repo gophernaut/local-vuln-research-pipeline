@@ -112,6 +112,23 @@ def _build_path_prompt(path: ExploitPath, function_sources: dict[str, str],
 
     code_text = "\n\n".join(code_blocks) if code_blocks else "(no code available)"
 
+    sink_context_key = f"__sink__{path.path_id}"
+    sink_context = function_sources.get(sink_context_key, "")
+    sink_context_block = ""
+    if sink_context:
+        sink_context_block = f"""
+== SINK SOURCE CONTEXT (code around the dangerous operation) ==
+File: {sink.file}:{sink.line}
+---
+{sink_context[:8000]}
+"""
+    elif not code_blocks:
+        sink_context_block = """
+
+== SINK SOURCE CODE ==
+Code: {sink.matched_text[:500]}
+"""
+
     prompt = f"""ANALYZE THIS EXPLOIT PATH. Determine if it is genuinely exploitable.
 
 == SOURCE (untrusted data entry) ==
@@ -128,6 +145,7 @@ Description: {sink.description}
 Code: {sink.matched_text}
 
 {cve_context}
+{sink_context_block}
 == DATA FLOW PATH ==
 The data flows through these functions (in order):
 """
@@ -196,6 +214,28 @@ def _load_function_sources(paths: list[ExploitPath], repo_path: Path) -> dict[st
                 function_sources[func_key] = "".join(lines[start:end])
             except Exception:
                 continue
+
+        sink_key = f"__sink__{path.path_id}"
+        if sink_key not in function_sources:
+            try:
+                sink_path = Path(path.sink.file)
+                if not sink_path.is_absolute():
+                    sink_path = repo_path / path.sink.file
+            except Exception:
+                sink_path = repo_path / path.sink.file
+            if sink_path.exists():
+                try:
+                    resolved = str(sink_path.resolve())
+                    if resolved not in file_cache:
+                        with open(resolved, encoding="utf-8", errors="replace") as f:
+                            file_cache[resolved] = f.readlines()
+                    lines = file_cache[resolved]
+                    start = max(0, path.sink.line - 11)
+                    end = min(len(lines), path.sink.line + 5)
+                    function_sources[sink_key] = "".join(lines[start:end])
+                except Exception:
+                    pass
+
     return function_sources
 
 
