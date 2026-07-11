@@ -207,11 +207,6 @@ def run(
     batches = _batch_files(uncovered)
     logger.info(f"  {len(batches)} files to review (1 per LLM call)")
 
-    max_batches = config.get("scaling.llm_priority_top_n", 1000)
-    if len(batches) > max_batches:
-        logger.warning(f"  Capping at {max_batches} files ({max_batches * MAX_FILES_PER_BATCH})")
-        batches = batches[:max_batches]
-
     client = LLMClient()
     all_findings = []
     errors = 0

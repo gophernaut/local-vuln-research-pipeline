@@ -84,9 +84,12 @@ class CallGraph:
         queue: deque[tuple[str, list[str]]] = deque([(source_key, [source_key])])
         visited_paths: set[str] = set()
 
-        while queue and len(paths) < max_paths:
+        depth_limit = max_depth if max_depth > 0 else 999999
+        count_limit = max_paths if max_paths > 0 else 999999
+
+        while queue and len(paths) < count_limit:
             current, path = queue.popleft()
-            if len(path) > max_depth:
+            if len(path) > depth_limit:
                 continue
             if current == target_key:
                 paths.append(path)
