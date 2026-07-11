@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from src.analysis.path_analyze import analyze_paths_with_llm
+from src.analysis.path_analyze import analyze_paths_with_llm, load_checkpoint_results
 from src.analysis.path_enum import ExploitPath, PathStep
 from src.analysis.source_tag import SourceTag
 from src.analysis.sink_tag import SinkTag
@@ -64,13 +64,21 @@ def _reconstruct_paths(path_data: list | dict) -> list[ExploitPath]:
     return paths
 
 
-def run(repo_path: Path, path_data: dict, cve_catalog: dict | None = None) -> dict[str, Any]:
+def run(repo_path: Path, path_data: dict, cve_catalog: dict | None = None,
+        checkpoint_dir: Path | None = None) -> dict[str, Any]:
     logger.info("Step 4c: Per-path LLM analysis...")
 
     t0 = time.time()
 
     max_paths = config.get("pipeline.max_llm_paths", 500)
     temperature = config.get("pipeline.llm_temperature", 0.3)
+
+    existing_results: list = []
+    completed_ids: set[str] = set()
+    if checkpoint_dir:
+        existing_results, completed_ids = load_checkpoint_results(checkpoint_dir)
+        if completed_ids:
+            logger.info(f"  Checkpoint: {len(completed_ids)} paths already analyzed, resuming...")
 
     paths_raw = path_data.get("paths", [])
     if not paths_raw and path_data.get("paths_count"):
@@ -95,7 +103,7 @@ def run(repo_path: Path, path_data: dict, cve_catalog: dict | None = None) -> di
     if cve_catalog:
         logger.info(f"  CVE catalog available: {cve_catalog.get('count', 0)} CVEs for context injection")
 
-    if not exploitable_paths:
+    if not exploitable_paths and not existing_results:
         logger.info("  No paths to analyze")
         return {
             "results": [],
@@ -108,12 +116,16 @@ def run(repo_path: Path, path_data: dict, cve_catalog: dict | None = None) -> di
             "elapsed_seconds": 0,
         }
 
-    results = analyze_paths_with_llm(
+    new_results = analyze_paths_with_llm(
         exploitable_paths, repo_path,
         max_paths=max_paths,
         temperature=temperature,
         cve_catalog=cve_catalog,
+        completed_ids=completed_ids or None,
+        checkpoint_dir=checkpoint_dir,
     )
+
+    results = existing_results + new_results
 
     verified = sum(1 for r in results if r.verdict == "VERIFIED_EXPLOITABLE")
     auto_classified = sum(1 for r in results if r.analysis_source == "auto")

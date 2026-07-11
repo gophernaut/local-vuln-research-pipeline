@@ -14,6 +14,9 @@ Ambiguous paths go to the LLM for reasoning. No path is skipped.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -272,12 +275,116 @@ def _has_sink_reach(path: ExploitPath) -> bool:
     return any(s.sink_reach for s in path.steps)
 
 
+_CHECKPOINT_LOCK = threading.Lock()
+
+CHECKPOINT_FILENAME = "path_analysis_progress.jsonl"
+
+
+def _result_to_checkpoint_dict(r: PathAnalysisResult) -> dict:
+    return {
+        "path_id": r.path_id,
+        "verdict": r.verdict,
+        "confidence": r.confidence,
+        "reasoning": r.reasoning,
+        "exploit_scenario": r.exploit_scenario,
+        "severity": r.severity,
+        "cwe_id": r.cwe_id,
+        "entry_point": r.entry_point,
+        "sink": r.sink,
+        "file_path": r.file_path,
+        "source_line": r.source_line,
+        "sink_line": r.sink_line,
+        "functions_on_path": r.functions_on_path,
+        "sanitizers_seen": r.sanitizers_seen,
+        "tainted_vars": r.tainted_vars,
+        "poc_idea": r.poc_idea,
+        "analysis_source": r.analysis_source,
+    }
+
+
+def _dict_to_result(d: dict) -> PathAnalysisResult:
+    return PathAnalysisResult(
+        path_id=d["path_id"],
+        verdict=d["verdict"],
+        confidence=d["confidence"],
+        reasoning=d.get("reasoning", ""),
+        exploit_scenario=d.get("exploit_scenario", ""),
+        severity=d.get("severity", "MEDIUM"),
+        cwe_id=d.get("cwe_id", ""),
+        entry_point=d.get("entry_point", ""),
+        sink=d.get("sink", ""),
+        file_path=d.get("file_path", ""),
+        source_line=d.get("source_line", 0),
+        sink_line=d.get("sink_line", 0),
+        functions_on_path=d.get("functions_on_path", []),
+        sanitizers_seen=d.get("sanitizers_seen", []),
+        tainted_vars=d.get("tainted_vars", []),
+        poc_idea=d.get("poc_idea", ""),
+        analysis_source=d.get("analysis_source", ""),
+    )
+
+
+def _append_checkpoint(checkpoint_dir: Path, result: PathAnalysisResult):
+    """Append a single result to the JSONL checkpoint file atomically."""
+    checkpoint_path = checkpoint_dir / CHECKPOINT_FILENAME
+    line = json.dumps(_result_to_checkpoint_dict(result), default=str) + "\n"
+
+    with _CHECKPOINT_LOCK:
+        existing = ""
+        if checkpoint_path.exists():
+            try:
+                existing = checkpoint_path.read_text(encoding="utf-8")
+            except Exception:
+                existing = ""
+
+        fd, tmp = tempfile.mkstemp(dir=str(checkpoint_dir), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(existing)
+                f.write(line)
+            os.replace(str(tmp), str(checkpoint_path))
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+
+
+def load_checkpoint_results(checkpoint_dir: Path) -> tuple[list[PathAnalysisResult], set[str]]:
+    """Load existing checkpoint results. Returns (results, completed_path_ids)."""
+    checkpoint_path = checkpoint_dir / CHECKPOINT_FILENAME
+    if not checkpoint_path.exists():
+        return [], set()
+
+    results = []
+    completed_ids = set()
+    try:
+        with open(checkpoint_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                    results.append(_dict_to_result(d))
+                    completed_ids.add(d["path_id"])
+                except (json.JSONDecodeError, KeyError):
+                    continue
+    except Exception:
+        return [], set()
+
+    return results, completed_ids
+
+
 def analyze_paths_with_llm(
     paths: list[ExploitPath],
     repo_path: Path,
     max_paths: int = 0,
     temperature: float = 0.3,
     cve_catalog: dict | None = None,
+    completed_ids: set[str] | None = None,
+    checkpoint_dir: Path | None = None,
 ) -> list[PathAnalysisResult]:
     logger.info(f"Analyzing {len(paths)} enumerated paths")
 
@@ -315,6 +422,13 @@ def analyze_paths_with_llm(
             llm_candidates.append(path)
 
     all_llm = llm_candidates + low_priority
+
+    if completed_ids:
+        before_count = len(all_llm)
+        all_llm = [p for p in all_llm if p.path_id not in completed_ids]
+        skipped = before_count - len(all_llm)
+        if skipped:
+            logger.info(f"  Checkpoint resume: skipping {skipped} already-analyzed paths")
 
     logger.info(f"  Dedup: {len(paths)} raw → {len(seen_combos)} unique "
                 f"(+{len(deterministic_results)} structurally invalid, "
@@ -380,10 +494,12 @@ Be specific. Cite exact lines. Don't pad with caveats. Make a decision.
         logger.info(f"  Using concurrent LLM analysis with {concurrency} workers")
         llm_results = _analyze_paths_concurrent(
             all_llm, system, function_sources, cve_catalog, temperature, client, concurrency,
+            checkpoint_dir=checkpoint_dir,
         )
     else:
         llm_results = _analyze_paths_sequential(
             all_llm, system, function_sources, cve_catalog, temperature, client,
+            checkpoint_dir=checkpoint_dir,
         )
 
     all_results = deterministic_results + llm_results
@@ -408,6 +524,7 @@ def _analyze_paths_sequential(
     cve_catalog: dict | None,
     temperature: float,
     client: LLMClient,
+    checkpoint_dir: Path | None = None,
 ) -> list[PathAnalysisResult]:
     llm_results: list[PathAnalysisResult] = []
     for i, path in enumerate(paths):
@@ -462,7 +579,7 @@ def _analyze_paths_sequential(
             except Exception:
                 pass
 
-        llm_results.append(_make_path_result(
+        path_result = _make_path_result(
             path, verdict,
             confidence,
             result_dict.get("reasoning", ""),
@@ -470,7 +587,14 @@ def _analyze_paths_sequential(
             result_dict.get("severity", path.sink.severity),
             result_dict.get("poc_idea", ""),
             "llm",
-        ))
+        )
+        llm_results.append(path_result)
+
+        if checkpoint_dir:
+            try:
+                _append_checkpoint(checkpoint_dir, path_result)
+            except Exception:
+                pass
 
         if (i + 1) % 50 == 0:
             logger.info(f"  LLM analyzed {i + 1}/{len(paths)} paths")
@@ -486,6 +610,7 @@ def _analyze_paths_concurrent(
     temperature: float,
     client: LLMClient,
     concurrency: int = 4,
+    checkpoint_dir: Path | None = None,
 ) -> list[PathAnalysisResult]:
     import concurrent.futures
 
@@ -550,13 +675,25 @@ def _analyze_paths_concurrent(
         futures = {executor.submit(_analyze_one, p): i for i, p in enumerate(paths)}
         for future in concurrent.futures.as_completed(futures):
             try:
-                llm_results.append(future.result())
+                path_result = future.result()
+                llm_results.append(path_result)
+                if checkpoint_dir:
+                    try:
+                        _append_checkpoint(checkpoint_dir, path_result)
+                    except Exception:
+                        pass
             except Exception as e:
                 idx = futures[future]
-                llm_results.append(_make_path_result(
+                err_result = _make_path_result(
                     paths[idx], "uncertain", 0.3,
                     f"Thread error: {e}", "", paths[idx].sink.severity, "", "llm",
-                ))
+                )
+                llm_results.append(err_result)
+                if checkpoint_dir:
+                    try:
+                        _append_checkpoint(checkpoint_dir, err_result)
+                    except Exception:
+                        pass
 
     logger.info(f"  Concurrent LLM analysis: {len(paths)} paths with {concurrency} workers")
     return llm_results
@@ -570,7 +707,10 @@ def analyze_paths(
     file_analyses: list,
     repo_path: Path,
     max_paths: int = 500,
+    completed_ids: set[str] | None = None,
+    checkpoint_dir: Path | None = None,
 ) -> list[PathAnalysisResult]:
     enumerator = PathEnumerator()
     paths = enumerator.enumerate_all_paths(call_graph, sources, sinks, sanitizers, file_analyses)
-    return analyze_paths_with_llm(paths, repo_path, max_paths=max_paths)
+    return analyze_paths_with_llm(paths, repo_path, max_paths=max_paths,
+                                  completed_ids=completed_ids, checkpoint_dir=checkpoint_dir)
