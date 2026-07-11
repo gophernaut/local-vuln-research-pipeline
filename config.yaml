@@ -34,7 +34,7 @@ pipeline:
   self_consistency_runs: 3
   max_deep_trace_files: 20
   early_termination: true
-  parallel_analyzers: 16
+  parallel_analyzers: 4
   max_path_depth: 0
   max_paths_per_pair: 0
   max_llm_paths: 0
@@ -47,12 +47,12 @@ scaling:
   skip_vendor_directories: true
   max_functions_per_chunk: 50000
   max_call_graph_edges: 500000
-  max_paths_total: 100000
-  max_paths_per_source: 100
-  max_paths_per_sink: 100
-  llm_priority_top_n: 1000
+  max_paths_total: 50000
+  max_paths_per_source: 50
+  max_paths_per_sink: 50
+  llm_priority_top_n: 500
   llm_batch_size: 16
-  num_workers: 16
+  num_workers: 8
   auto_adapt_to_size: true
 
 thresholds:

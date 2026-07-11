@@ -167,7 +167,7 @@ def _cmd_estimate(repo_path: str):
 
     adapter = LargeCodebaseAdapter()
     config = adapter.get_adaptive_config(size_mb, file_count)
-    resources = adapter.estimate_resources(file_count)
+    resources = adapter.estimate_resources(file_count, config)
 
     print(f"Files: {file_count}")
     print(f"Size: {size_mb:.1f} MB")
@@ -179,7 +179,7 @@ def _cmd_estimate(repo_path: str):
     print(f"  Paths: ~{resources['estimated_paths']:,}")
     print(f"  LLM analysis: ~{resources['estimated_llm_minutes']:.0f} minutes")
     print(f"\nConfig:")
-    print(f"  Max LLM paths: {config.max_llm_paths}")
+    print(f"  Max LLM paths: {'unlimited' if config.max_llm_paths == 0 else config.max_llm_paths}")
     print(f"  Workers: {config.num_workers}")
     print(f"  Files per chunk: {config.max_files_per_chunk}")
 

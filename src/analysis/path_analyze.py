@@ -171,6 +171,7 @@ OUTPUT FORMAT (valid JSON):
 
 def _load_function_sources(paths: list[ExploitPath], repo_path: Path) -> dict[str, str]:
     function_sources = {}
+    file_cache: dict[str, list[str]] = {}
     for path in paths:
         for step in path.steps:
             func_key = step.function_key
@@ -185,8 +186,11 @@ def _load_function_sources(paths: list[ExploitPath], repo_path: Path) -> dict[st
             if not file_path.exists():
                 continue
             try:
-                with open(file_path, encoding="utf-8", errors="replace") as f:
-                    lines = f.readlines()
+                resolved = str(file_path.resolve())
+                if resolved not in file_cache:
+                    with open(resolved, encoding="utf-8", errors="replace") as f:
+                        file_cache[resolved] = f.readlines()
+                lines = file_cache[resolved]
                 start = max(0, step.line - 1)
                 end = min(len(lines), start + 100)
                 function_sources[func_key] = "".join(lines[start:end])
@@ -309,29 +313,16 @@ def analyze_paths_with_llm(
 
     function_sources = _load_function_sources(all_llm, repo_path)
 
-    client = LLMClient()
-    llm_results = []
-
-    system = f"""{GUARD_PREAMBLE}
-
-You are an elite exploit developer performing per-path exploitability analysis.
-
-Your job: given a pre-traced source-to-sink path with the complete function code,
-determine if it is genuinely exploitable. You are NOT searching for vulns — the
-path has already been enumerated. You are validating ONE specific path.
-
-DECISION CRITERIA:
-- VERIFIED_EXPLOITABLE: Path is reachable, tainted data flows to sink, no
-  effective sanitizers, attacker can control data externally.
-- BLOCKED: Path has an effective sanitizer between source and sink, or the
-  sink is unreachable, or the data is sanitized before reaching the sink.
-- UNCERTAIN: Cannot determine without runtime info. Report what additional
-  evidence would be needed.
-
-Be specific. Cite exact lines. Don't pad with caveats. Make a decision.
-"""
-
-    for i, path in enumerate(all_llm):
+def _analyze_paths_sequential(
+    paths: list[ExploitPath],
+    system: str,
+    function_sources: dict[str, str],
+    cve_catalog: dict | None,
+    temperature: float,
+    client: LLMClient,
+) -> list[PathAnalysisResult]:
+    llm_results: list[PathAnalysisResult] = []
+    for i, path in enumerate(paths):
         if not path.is_exploitable:
             continue
 
@@ -363,7 +354,7 @@ Be specific. Cite exact lines. Don't pad with caveats. Make a decision.
         elif verdict == "blocked":
             verdict = "BLOCKED"
 
-        if verdict == "uncertain" or confidence < 0.6:
+        if verdict == "uncertain" or confidence < 0.3:
             logger.info(f"  Low confidence ({confidence}) for {path.path_id}, running self-consistency...")
             try:
                 sc_result = client.self_consistent(
@@ -394,7 +385,126 @@ Be specific. Cite exact lines. Don't pad with caveats. Make a decision.
         ))
 
         if (i + 1) % 50 == 0:
-            logger.info(f"  LLM analyzed {i + 1}/{len(all_llm)} paths")
+            logger.info(f"  LLM analyzed {i + 1}/{len(paths)} paths")
+
+    return llm_results
+
+
+def _analyze_paths_concurrent(
+    paths: list[ExploitPath],
+    system: str,
+    function_sources: dict[str, str],
+    cve_catalog: dict | None,
+    temperature: float,
+    client: LLMClient,
+    concurrency: int = 4,
+) -> list[PathAnalysisResult]:
+    import concurrent.futures
+
+    def _analyze_one(path: ExploitPath) -> PathAnalysisResult:
+        if not path.is_exploitable:
+            return _make_path_result(
+                path, "BLOCKED", 0.95,
+                "Not exploitable.", "", path.sink.severity, "", "auto",
+            )
+
+        prompt = _build_path_prompt(path, function_sources, cve_catalog)
+        c = LLMClient()
+
+        try:
+            result = c.chat_json(system, prompt, temperature=temperature, max_tokens=2048)
+        except Exception:
+            result = None
+
+        if not result:
+            return _make_path_result(
+                path, "uncertain", 0.3,
+                "LLM call failed.", "", path.sink.severity, "", "llm",
+            )
+
+        result_dict = result if isinstance(result, dict) else {}
+        verdict = result_dict.get("verdict", "uncertain")
+        confidence = float(result_dict.get("confidence", 0.5))
+
+        if verdict == "exploitable":
+            verdict = "VERIFIED_EXPLOITABLE"
+        elif verdict == "blocked":
+            verdict = "BLOCKED"
+
+        if verdict == "uncertain" or confidence < 0.3:
+            try:
+                sc_result = c.self_consistent(system, prompt, runs=3, temperature=0.4)
+                if sc_result:
+                    sc_dict = sc_result if isinstance(sc_result, dict) else {}
+                    sc_verdict = sc_dict.get("verdict", "uncertain")
+                    if sc_verdict == "exploitable":
+                        sc_verdict = "VERIFIED_EXPLOITABLE"
+                    elif sc_verdict == "blocked":
+                        sc_verdict = "BLOCKED"
+                    if sc_verdict != "uncertain":
+                        verdict = sc_verdict
+                        confidence = max(confidence, float(sc_dict.get("confidence", confidence)))
+                        result_dict = sc_dict
+            except Exception:
+                pass
+
+        return _make_path_result(
+            path, verdict, confidence,
+            result_dict.get("reasoning", ""),
+            result_dict.get("exploit_scenario", ""),
+            result_dict.get("severity", path.sink.severity),
+            result_dict.get("poc_idea", ""),
+            "llm",
+        )
+
+    llm_results = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as executor:
+        futures = {executor.submit(_analyze_one, p): i for i, p in enumerate(paths)}
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                llm_results.append(future.result())
+            except Exception as e:
+                idx = futures[future]
+                llm_results.append(_make_path_result(
+                    paths[idx], "uncertain", 0.3,
+                    f"Thread error: {e}", "", paths[idx].sink.severity, "", "llm",
+                ))
+
+    logger.info(f"  Concurrent LLM analysis: {len(paths)} paths with {concurrency} workers")
+    return llm_results
+
+    system = f"""{GUARD_PREAMBLE}
+
+You are an elite exploit developer performing per-path exploitability analysis.
+
+Your job: given a pre-traced source-to-sink path with the complete function code,
+determine if it is genuinely exploitable. You are NOT searching for vulns — the
+path has already been enumerated. You are validating ONE specific path.
+
+DECISION CRITERIA:
+- VERIFIED_EXPLOITABLE: Path is reachable, tainted data flows to sink, no
+  effective sanitizers, attacker can control data externally.
+- BLOCKED: Path has an effective sanitizer between source and sink, or the
+  sink is unreachable, or the data is sanitized before reaching the sink.
+- UNCERTAIN: Cannot determine without runtime info. Report what additional
+  evidence would be needed.
+
+Be specific. Cite exact lines. Don't pad with caveats. Make a decision.
+"""
+
+    client = LLMClient()
+    use_concurrent = config.get("pipeline.parallel_analyzers", 0) > 0
+
+    if use_concurrent and len(all_llm) > 10:
+        concurrency = min(config.get("pipeline.parallel_analyzers", 4), 16)
+        logger.info(f"  Using concurrent LLM analysis with {concurrency} workers")
+        llm_results = _analyze_paths_concurrent(
+            all_llm, system, function_sources, cve_catalog, temperature, client, concurrency,
+        )
+    else:
+        llm_results = _analyze_paths_sequential(
+            all_llm, system, function_sources, cve_catalog, temperature, client,
+        )
 
     all_results = deterministic_results + llm_results
     verified = sum(1 for r in all_results if r.verdict == "VERIFIED_EXPLOITABLE")

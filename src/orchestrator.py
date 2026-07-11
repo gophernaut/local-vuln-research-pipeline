@@ -45,6 +45,10 @@ STEP_ORDER = {
     "4b": 7, "4c": 8, "4d": 9, "5": 10, "6": 11, "7": 12, "8": 13, "9": 14,
 }
 
+ALL_STEP_KEYS = ["0", "1", "2", "2b", "3", "3b", "4", "4b", "4c", "4d", "5", "6", "7", "8", "9"]
+
+logger = get_logger()
+
 
 def _safe_write(path: Path, content: str):
     for attempt in range(3):
@@ -60,9 +64,6 @@ def _safe_write(path: Path, content: str):
 
 def _step_key(num) -> int:
     return STEP_ORDER.get(str(num), 99)
-
-
-logger = get_logger()
 
 
 class Orchestrator:
@@ -193,17 +194,19 @@ class Orchestrator:
 
     def _find_resume_step(self) -> int | None:
         steps = self.progress.get("steps", {})
-        for step_num in range(20):
-            if str(step_num) not in steps or steps[str(step_num)].get("status") != "done":
-                return step_num
+        for step_key in ALL_STEP_KEYS:
+            if step_key not in steps or steps[step_key].get("status") != "done":
+                return STEP_ORDER.get(step_key, 99)
         return None
 
     def _is_step_done(self, step_num: int | str, output_file: str) -> bool:
         step_key = str(step_num)
         steps = self.progress.get("steps", {})
+        output_path = self.checkpoint_dir / output_file
         if step_key in steps and steps[step_key].get("status") == "done":
-            output_path = self.checkpoint_dir / output_file
             return output_path.exists()
+        if output_path.exists() and step_key not in steps:
+            return True
         return False
 
     def _check_deps(self, deps: list[str]):
@@ -275,7 +278,7 @@ class Orchestrator:
             "|------|------|--------|----------|",
         ]
 
-        for sn in ["0", "1", "2", "2b", "3", "3b", "4", "4b", "4c", "4d", "5", "6", "7", "8", "9"]:
+        for sn in ALL_STEP_KEYS:
             step = steps.get(sn, {})
             name = step.get("name", STEP_NAMES.get(sn, "?"))
             status = step.get("status", "pending")
@@ -295,18 +298,52 @@ class Orchestrator:
 
     def _load_progress(self):
         progress_path = self.checkpoint_dir / "progress.md"
-        if progress_path.exists():
-            self.progress = {
-                "repo_path": str(self.repo_path),
-                "checkpoint_key": self.checkpoint_key,
-                "steps": {},
-            }
+        self.progress = {
+            "repo_path": str(self.repo_path),
+            "checkpoint_key": self.checkpoint_key,
+            "steps": {},
+        }
 
-            for f in self.checkpoint_dir.glob("*.json"):
-                step_name = f.stem
-                self.progress["steps"][step_name] = {
-                    "status": "done",
-                }
+        json_to_step = {
+            "fingerprint": "0", "classification": "1", "deps_vulns": "2",
+            "secrets": "2b", "static_analysis": "3", "code_graph": "3b",
+            "threat_model": "4", "path_enum": "4b", "path_analysis": "4c",
+            "blindspot_findings": "4d", "memory_findings": "5", "chains": "6",
+            "validated_findings": "7", "anomaly": "8",
+        }
+        json_status = {}
+        for f in self.checkpoint_dir.glob("*.json"):
+            step_num = json_to_step.get(f.stem, f.stem)
+            json_status[step_num] = "done"
+
+        if progress_path.exists():
+            try:
+                lines = progress_path.read_text(encoding="utf-8").split("\n")
+                in_table = False
+                for line in lines:
+                    if line.startswith("| ") and "|" in line[2:]:
+                        in_table = True
+                        parts = [p.strip() for p in line.split("|")]
+                        if len(parts) >= 4:
+                            step_key = parts[1]
+                            status_text = parts[3] if len(parts) > 3 else "pending"
+                            if step_key in ALL_STEP_KEYS:
+                                status = "done" if status_text.startswith("Done") else "failed" if "FAILED" in status_text else "pending"
+                                self.progress["steps"][step_key] = {
+                                    "name": STEP_NAMES.get(step_key, step_key),
+                                    "status": status,
+                                }
+                    elif in_table and not line.strip():
+                        in_table = False
+            except Exception:
+                pass
+
+        if not self.progress["steps"]:
+            self.progress["steps"] = {k: {"status": v} for k, v in json_status.items()}
+
+        completed = sum(1 for s in self.progress["steps"].values() if s.get("status") == "done")
+        self.progress["last_updated"] = datetime.now(timezone.utc).isoformat()
+        self.progress["status"] = "COMPLETE" if completed >= len(ALL_STEP_KEYS) else "IN_PROGRESS"
 
     def _step0(self):
         from src.pipeline.step0_fingerprint import run
@@ -447,7 +484,8 @@ Output valid JSON:
 
     def _step7_validate(self):
         path_analysis = self.state.get("path_analysis", {})
-        memory_findings = self.state.get("memory_findings", {}).get("findings", [])
+        code_graph = self.state.get("code_graph", {})
+        memory_findings = code_graph.get("memory_findings", [])
 
         verified = [r for r in path_analysis.get("results", [])
                     if r.get("verdict") == "VERIFIED_EXPLOITABLE"]

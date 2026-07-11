@@ -75,10 +75,10 @@ def run(repo_path: Path, path_data: dict, cve_catalog: dict | None = None) -> di
     paths_raw = path_data.get("paths", [])
     if not paths_raw and path_data.get("paths_count"):
         import json
-        checkpoint_dir = repo_path.parent / "data" / "checkpoints"
+        from src.config import ROOT_DIR
         from src.utils.file_utils import repo_checkpoint_key
         ck = repo_checkpoint_key(repo_path)
-        jsonl_path = checkpoint_dir / ck / "path_enum.jsonl"
+        jsonl_path = ROOT_DIR / "data" / "checkpoints" / ck / "path_enum.jsonl"
         if jsonl_path.exists():
             logger.info(f"  Loading full paths from {jsonl_path}...")
             paths_raw = []

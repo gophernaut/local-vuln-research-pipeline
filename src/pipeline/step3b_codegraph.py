@@ -2,10 +2,14 @@
 
 Constructs: call graph, source tags, sink tags, sanitizer tags, memory analysis.
 This is the foundation for the path enumeration that follows.
+
+Uses single-pass file reading: all taggers share the same source content cache,
+eliminating redundant disk I/O.
 """
 from __future__ import annotations
 
 import time
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -13,17 +17,35 @@ from src.analysis.call_graph import CallGraphBuilder
 from src.analysis.source_tag import SourceTagger
 from src.analysis.sink_tag import SinkTagger
 from src.analysis.sanitizer_tag import SanitizerTagger
-from src.analysis.ast_parser import ASTParser
+from src.analysis.ast_parser import ASTParser, LANGUAGE_EXTENSIONS, SKIP_DIRS
 from src.analysis.memory.orchestrator import run_memory_analysis
 from src.utils.logger import get_logger
 
 logger = get_logger()
 
 
+def _build_file_content_cache(repo_path: Path) -> dict[Path, str]:
+    """Single-pass read of all source files into a content cache shared by all taggers."""
+    cache: dict[Path, str] = {}
+    for ext, lang in LANGUAGE_EXTENSIONS.items():
+        for filepath in repo_path.rglob(f"*{ext}"):
+            if any(d in filepath.parts for d in SKIP_DIRS):
+                continue
+            try:
+                cache[filepath] = filepath.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                continue
+    return cache
+
+
 def run(repo_path: Path) -> dict[str, Any]:
-    logger.info("Step 3b: Building complete code graph...")
+    logger.info("Step 3b: Building complete code graph (single-pass I/O)...")
 
     t0 = time.time()
+
+    logger.info("  Reading all source files (single pass)...")
+    file_content = _build_file_content_cache(repo_path)
+    logger.info(f"  Read {len(file_content)} files into shared cache")
 
     parser = ASTParser()
     logger.info("  Parsing all source files with tree-sitter...")
@@ -36,20 +58,35 @@ def run(repo_path: Path) -> dict[str, Any]:
     logger.info(f"  Call graph: {len(call_graph.nodes)} functions, "
                 f"{sum(len(e) for e in call_graph.edges.values())} edges")
 
-    logger.info("  Tagging sources (untrusted entry points)...")
     source_tagger = SourceTagger()
-    sources = source_tagger.tag_repo(repo_path)
-    logger.info(f"  Found {len(sources)} source tags")
-
-    logger.info("  Tagging sinks (dangerous operations)...")
     sink_tagger = SinkTagger()
-    sinks = sink_tagger.tag_repo(repo_path)
-    logger.info(f"  Found {len(sinks)} sink tags")
-
-    logger.info("  Tagging sanitizers...")
     sanitizer_tagger = SanitizerTagger()
-    sanitizers = sanitizer_tagger.tag_repo(repo_path)
-    logger.info(f"  Found {len(sanitizers)} sanitizer tags")
+
+    sources = []
+    sinks = []
+    sanitizers = []
+
+    ext_to_lang = LANGUAGE_EXTENSIONS
+    for filepath, src in file_content.items():
+        ext = filepath.suffix.lower()
+        language = ext_to_lang.get(ext, "")
+
+        try:
+            sources.extend(source_tagger.tag_file(filepath, src, language))
+        except Exception:
+            pass
+
+        try:
+            sinks.extend(sink_tagger.tag_file(filepath, src, language))
+        except Exception:
+            pass
+
+        try:
+            sanitizers.extend(sanitizer_tagger.tag_file(filepath, src, language))
+        except Exception:
+            pass
+
+    logger.info(f"  Found {len(sources)} source tags, {len(sinks)} sink tags, {len(sanitizers)} sanitizer tags")
 
     logger.info("  Running memory corruption analysis...")
     memory_findings = run_memory_analysis(repo_path)

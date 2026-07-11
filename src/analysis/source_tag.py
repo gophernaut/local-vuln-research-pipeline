@@ -209,7 +209,7 @@ SOURCE_PATTERNS = {
         (r"\bread\s+-", "STDIN", "read command"),
         (r"\bcat\s+", "FILE_READ", "cat command"),
         (r"<\s*\(", "STDIN", "Process substitution"),
-        (r"\b\$1\b|\b\$2\b|\b\$@\b|\b\$*\b", "CLI_ARG", "Shell positional args"),
+        (r"\b\$[0-9@*#!?\-]\b", "CLI_ARG", "Shell positional args"),
         (r"\bcurl\s+", "HTTP_CLIENT", "curl HTTP client"),
         (r"\bwget\s+", "HTTP_CLIENT", "wget HTTP client"),
         (r"\bsource\s+", "FILE_READ", "source command"),

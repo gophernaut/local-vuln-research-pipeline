@@ -89,6 +89,9 @@ SINK_TO_SANITIZER_TAXONOMY = {
     "integer_overflow": ["buffer_overflow"],
     "transmute": ["buffer_overflow", "memory_corruption"],
     "yaml_deserialize": ["deserialization"],
+    "prototype_pollution": ["xss", "code_execution"],
+    "graphql_injection": ["nosql_injection"],
+    "dynamic_require": ["path_traversal", "code_execution"],
 }
 
 
@@ -100,10 +103,12 @@ SOURCE_SINK_COMPATIBILITY = {
                      "buffer_overflow", "race_condition", "format_string",
                      "auth_bypass", "hardcoded_secret", "weak_crypto", "weak_random",
                      "race_condition", "toctou", "security_misconfig",
-                     "object_injection", "code_injection"],
+                     "object_injection", "code_injection", "prototype_pollution",
+                     "graphql_injection"],
     "HTTP_BODY": ["command_execution", "sql_injection", "ssrf", "path_traversal",
                   "deserialization", "code_execution", "file_write",
-                  "auth_bypass", "hardcoded_secret", "weak_crypto"],
+                  "auth_bypass", "hardcoded_secret", "weak_crypto", "prototype_pollution",
+                  "graphql_injection"],
     "HTTP_PARAM": ["command_execution", "sql_injection", "ssrf", "path_traversal",
                    "deserialization", "code_execution", "ldap_injection", "xpath_injection",
                    "auth_bypass", "hardcoded_secret", "weak_crypto", "weak_random",
@@ -187,7 +192,7 @@ class PathEnumerator:
 
         all_paths: list[ExploitPath] = []
         path_id = 0
-        seen_combos: set[tuple[str, int, str, int, str]] = set()
+        seen_combos: set[tuple[str, str, int, str]] = set()
 
         for source_file, source_list in sources_by_file.items():
             for source in source_list:
@@ -211,7 +216,7 @@ class PathEnumerator:
                                     max_paths=self.max_paths_per_pair,
                                 )
                                 for path in paths:
-                                    combo = (source.file, source.line, sink.file, sink.line, sink.category)
+                                    combo = (source.source_type, source.file, source.line, sink.file, sink.line, sink.category)
                                     if combo in seen_combos:
                                         continue
                                     seen_combos.add(combo)
@@ -236,7 +241,7 @@ class PathEnumerator:
                                 pass
                             elif has_source_func:
                                 for source_key in source_func_keys:
-                                    combo = (source.file, source.line, sink.file, sink.line, sink.category)
+                                    combo = (source.source_type, source.file, source.line, sink.file, sink.line, sink.category)
                                     if combo in seen_combos:
                                         continue
                                     seen_combos.add(combo)
@@ -250,7 +255,7 @@ class PathEnumerator:
                                         all_paths.append(exploit_path)
                                         path_id += 1
                             else:
-                                combo = (source.file, source.line, sink.file, sink.line, sink.category)
+                                combo = (source.source_type, sink.file, sink.line, sink.category)
                                 if combo in seen_combos:
                                     continue
                                 seen_combos.add(combo)
@@ -454,6 +459,10 @@ class PathEnumerator:
                 if protected in normalized_categories:
                     return True
         return False
+
+    def _sanitizer_applies_to(self, sanitizer: SanitizerTag,
+                               tainted_vars: set[str]) -> bool:
+        return len(tainted_vars) > 0
 
     def _language_for_file(self, filepath: str) -> str:
         from src.analysis.ast_parser import LANGUAGE_EXTENSIONS

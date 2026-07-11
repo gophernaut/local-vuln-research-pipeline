@@ -109,6 +109,13 @@ def _get_identifier_name(node, source: str) -> str:
     return ""
 
 
+NOISE_FUNCTIONS = {
+    "print", "log", "logger.", "logging.", "writeln", "Write-Host",
+    "echo", "fmt.Println", "fmt.Printf", "System.out.println",
+    "console.log", "dump", "var_dump", "toString", "__repr__",
+    "__str__", "str", "repr", "format", "len", "type", "isinstance",
+}
+
 SANITIZER_FUNCTIONS = {
     "html.escape", "html_escape", "escape_html", "sanitize_html", "sanitize",
     "bleach.clean", "strip_tags", "DOMPurify.sanitize", "xss_filter",
@@ -190,6 +197,8 @@ def _get_call_name_and_args(node, source: str, language: str) -> tuple[str, list
 class IntraTaintTracker:
     def __init__(self):
         self.parsers = _ensure_parsers()
+        self.global_vars: dict[str, set[str]] = {}
+        self.class_vars: dict[str, set[str]] = {}
 
     def trace_function(self, function_body: str, function_name: str, file: str,
                        language: str, source_tag_vars: set[str],
@@ -298,6 +307,19 @@ class IntraTaintTracker:
             for t in state.tainted_vars
         )
 
+        if target and right_refs_taint:
+            if "." in target:
+                parts = target.split(".", 1)
+                if parts[0] in ("self", "this"):
+                    if parts[0] not in self.class_vars:
+                        self.class_vars[parts[0]] = set()
+                    self.class_vars[parts[0]].add(parts[1])
+                    state.tainted_vars.add(target)
+            elif target in getattr(self, 'current_function_globals', set()):
+                if target not in self.global_vars:
+                    self.global_vars[target] = set()
+                self.global_vars[target].add(target)
+
         is_tainted = right_refs_taint
 
         if target and is_tainted:
@@ -342,6 +364,11 @@ class IntraTaintTracker:
 
     def _handle_call(self, node, source: str, state: TaintState, language: str):
         func_name, args = _get_call_name_and_args(node, source, language)
+
+        fn_lower = func_name.lower()
+        for noise_fn in NOISE_FUNCTIONS:
+            if noise_fn.lower() in fn_lower:
+                return
 
         is_sanitizer = _is_sanitizer_call(func_name)
 

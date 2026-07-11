@@ -68,6 +68,7 @@ ALL_SINKS = {
         (r"\bjwt\.decode\s*\([^)]*verify\s*=\s*False", "auth_bypass", "CWE-347", "JWT decode without signature verification"),
         (r"\bjwt\.decode\s*\([^,)]*\)", "auth_bypass", "CWE-347", "JWT decode (check signature verification)"),
         (r"\bjwt\.encode\s*\(", "auth_bypass", "CWE-347", "JWT encode (ensure proper signing)"),
+        (r"jwt\.decode\s*\([^)]*algorithms\s*=\s*\[", "auth_bypass", "CWE-347", "JWT algorithm confusion risk"),
         (r"\bmd5\s*\(", "weak_crypto", "CWE-328", "MD5 hash function"),
         (r"\bDES\s*\.\s*new", "weak_crypto", "CWE-327", "DES cipher (deprecated)"),
         (r"verify\s*=\s*False", "auth_bypass", "CWE-295", "TLS/SSL verification disabled"),
@@ -87,7 +88,6 @@ ALL_SINKS = {
         (r"if\s+balance\s*>=", "race_condition", "CWE-362", "TOCTOU: check balance then deduct (race)"),
         (r"time\.sleep\s*\(", "race_condition", "CWE-362", "Sleep in critical section (race window)"),
         (r"\b(?:sql|query|cmd|command)\s*=\s*['\"](?:SELECT|INSERT|UPDATE|DELETE)", "sql_injection", "CWE-89", "SQL string construction"),
-        (r"\.format\s*\(.*\)", "format_string", "CWE-134", "String formatting (potential format string)"),
         (r"\{\s*\}\s*\.format", "format_string", "CWE-134", "str.format with user input"),
         (r"\bFlask\s*\(", "web_framework", "", "Web framework entry"),
         (r"\bFastAPI\s*\(", "web_framework", "", "Web framework entry"),
@@ -110,6 +110,8 @@ ALL_SINKS = {
         (r"\.find\s*\(\s*\{[^}]*\$", "nosql_injection", "CWE-943", "NoSQL injection"),
         (r"\$where\b", "nosql_injection", "CWE-943", "MongoDB $where injection"),
         (r"\$expr\b", "nosql_injection", "CWE-943", "MongoDB $expr injection"),
+        (r"__proto__", "prototype_pollution", "CWE-915", "Prototype pollution"),
+        (r"Object\.assign\s*\(\s*[^)]*[,[{]", "prototype_pollution", "CWE-915", "Object.assign merge with user input"),
     ],
     "java": [
         (r"\bRuntime\.getRuntime\(\)\.exec\s*\(", "command_execution", "CWE-78", "Runtime exec"),
@@ -218,6 +220,8 @@ ALL_SINKS = {
         (r"\.exec\s*\(\s*`", "command_execution", "CWE-78", "Command via template literal"),
         (r"dangerouslySetInnerHTML", "xss", "CWE-79", "React dangerouslySetInnerHTML"),
         (r"bypassSecurityTrust", "xss", "CWE-79", "Angular bypassSecurityTrust*"),
+        (r"__proto__|constructor\s*\[", "prototype_pollution", "CWE-915", "Prototype pollution"),
+        (r"Object\.assign\s*\(\s*[^)]*[,[{]", "prototype_pollution", "CWE-915", "Object.assign merge with user input"),
     ],
     "scala": [
         (r"\bRuntime\.getRuntime\(\)\.exec\s*\(", "command_execution", "CWE-78", "Runtime exec"),
@@ -362,7 +366,8 @@ class SinkTagger:
         high = {"buffer_overflow", "path_traversal", "ssrf", "xxe", "template_injection",
                 "race_condition", "format_string", "unsafe_block", "transmute", "ffi",
                 "reflection_invoke", "ldap_injection", "xpath_injection", "spel_injection",
-                "nosql_injection", "variable_overwrite", "integer_overflow"}
+                "nosql_injection", "variable_overwrite", "integer_overflow",
+                "prototype_pollution", "graphql_injection"}
         medium = {"hardcoded_secret", "weak_crypto", "weak_random", "insecure_crypto",
                   "file_write", "xss", "information_disclosure", "string_cast", "data_access",
                   "new_array", "delete_array", "delete_obj", "free", "unsafe_copy",

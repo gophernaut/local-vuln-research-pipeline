@@ -1,4 +1,4 @@
-"""Step 7: Chain synthesis — combines individual findings into multi-step exploit chains.
+"""Step 6: Chain synthesis — combines individual findings into multi-step exploit chains.
 
 Builds attack graph from verified exploitable paths, computes valid chains.
 """

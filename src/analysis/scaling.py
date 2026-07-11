@@ -410,38 +410,53 @@ class LargeCodebaseAdapter:
         return self.stats
 
     def get_adaptive_config(self, repo_size_mb: float, file_count: int) -> ScaleConfig:
-        """Adapt configuration based on repository size."""
-        config = ScaleConfig()
+        """Adapt configuration based on repository size. Respects config.yaml overrides."""
+        from src.config import config as cfg
+        sc = ScaleConfig()
+
+        max_llm_paths_override = cfg.get("pipeline.max_llm_paths", -1)
+        max_path_depth_override = cfg.get("pipeline.max_path_depth", 0)
+        max_paths_per_pair_override = cfg.get("pipeline.max_paths_per_pair", 0)
+        num_workers_override = cfg.get("scaling.num_workers", 0)
 
         if file_count < 100:
-            config.max_paths_total = 10_000
-            config.max_llm_paths = 200
+            sc.max_paths_total = 10_000
+            sc.max_llm_paths = 200 if max_llm_paths_override < 0 else max_llm_paths_override
         elif file_count < 1000:
-            config.max_paths_total = 50_000
-            config.max_llm_paths = 500
+            sc.max_paths_total = 50_000
+            sc.max_llm_paths = 500 if max_llm_paths_override < 0 else max_llm_paths_override
         elif file_count < 10_000:
-            config.max_paths_total = 100_000
-            config.max_llm_paths = 1000
-            config.num_workers = min(16, (os.cpu_count() or 4) * 2)
+            sc.max_paths_total = 100_000
+            sc.max_llm_paths = 1000 if max_llm_paths_override < 0 else max_llm_paths_override
+            sc.num_workers = min(16, (os.cpu_count() or 4) * 2)
         else:
-            config.max_paths_total = 200_000
-            config.max_llm_paths = 2000
-            config.num_workers = min(32, (os.cpu_count() or 4) * 2)
-            config.llm_batch_size = 32
+            sc.max_paths_total = 200_000
+            sc.max_llm_paths = 2000 if max_llm_paths_override < 0 else max_llm_paths_override
+            sc.num_workers = min(32, (os.cpu_count() or 4) * 2)
+            sc.llm_batch_size = 32
+
+        if num_workers_override > 0:
+            sc.num_workers = num_workers_override
 
         if repo_size_mb > 1000:
-            config.max_functions_per_chunk = 25_000
-            config.max_file_size_bytes = 5_000_000
+            sc.max_functions_per_chunk = 25_000
+            sc.max_file_size_bytes = 5_000_000
 
-        return config
+        return sc
 
-    def estimate_resources(self, file_count: int) -> dict:
+    def estimate_resources(self, file_count: int, config: ScaleConfig | None = None) -> dict:
         """Estimate resources needed for analysis."""
+        cfg = config or self.config
         est_functions = file_count * 5
         est_sources = file_count * 3
         est_sinks = file_count * 2
-        est_paths = est_sources * est_sinks * 2
-        est_llm_time_min = min(self.config.max_llm_paths, est_paths) * 5 / 60
+        raw_combos = est_sources * est_sinks
+        est_paths = max(50, int(raw_combos * 0.0001))
+
+        if cfg.max_llm_paths == 0:
+            est_llm_time_min = est_paths * 15 / 60
+        else:
+            est_llm_time_min = min(cfg.max_llm_paths, est_paths) * 15 / 60
 
         return {
             "estimated_functions": est_functions,
