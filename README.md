@@ -1,4 +1,16 @@
-# Local Vuln Research System
+<pre align="center">
+ _     ___   ____  ___ 
+| |   / / | / / / / _ \
+| |  / /| |/ / / / / ,_/
+| |_/ / |   / /_/ / /_  
+|___(_)|__/ \____/ ___/
+</pre>
+
+# LVRP — Local Vuln Research Pipeline
+
+> Every source file reviewed. Every source-to-sink path traced. Every vulnerability found — locally, exhaustively, without a single API call.
+
+---
 
 Exhaustive LLM-driven whitebox vulnerability research pipeline that finds every single vulnerability in any source code. Built on a code graph + LLM hybrid architecture that enumerates and validates all source-to-sink paths.
 
