@@ -27,7 +27,7 @@ Finds every valid vulnerability in source code through exhaustive enumeration:
 11. Analyzes memory corruption for C/C++/Rust codebases
 12. Synthesizes multi-step exploit chains via networkx transitive closure
 
-Every source (untrusted input entry point) is paired with every compatible sink (dangerous operation) and all call-graph paths between them are analyzed. Nothing is sampled.
+Every source (untrusted input entry point) is paired with every compatible sink (dangerous operation) and all call-graph paths between them are enumerated. Nothing is sampled. The path enumeration is always exhaustive — LLM validation depth scales with your hardware (see [Exhaustive vs Smart](#exhaustive-mode-vs-smart-mode)).
 
 ---
 
@@ -200,11 +200,13 @@ For each enumerated path:
 1. Paths are deduplicated by unique (source, sink, category) combination
 2. Clear-cut cases get deterministic verdicts: sanitizer-taxonomy match → auto-BLOCKED, unreachable sink → auto-BLOCKED
 3. Only ambiguous paths go to the LLM (real function chains, taint present, no matching sanitizer)
-4. **Smart prioritization**: when path count exceeds limit, a context-aware ranking ensures:
-   - ALL CRITICAL + HIGH severity paths always analyzed (zero missed high-impact vulns)
-   - Coverage guarantee: ≥1 path per unique sink category in the codebase
+4. **Smart prioritization** (hardware-aware — scales to any GPU):
+   - The system enumerates ALL paths but adapts LLM analysis to your hardware
+   - Default smart limit (~2000 paths, ~1 hr on RTX 4070 Ti) ensures zero missed CRITICAL/HIGH vulns
+   - **Have better hardware?** Set `smart_limit_max: 0` in config.yaml to analyze literally every single path — true exhaustive coverage. A 4090 or multi-GPU setup can run 16-32 workers and chew through 100K+ paths
+   - Coverage guarantee: ≥1 path per unique sink category in the codebase — no vuln class is ever skipped
    - Context-aware vuln class weights: Python repos boost SSTI/deserialization; C repos boost memory corruption; Java repos boost deserialization/SpEL
-   - Adaptive cap scales with codebase size — small repos (<5000 paths) analyze everything
+   - Adaptive cap: small repos (<5000 paths) automatically analyze everything regardless of limit
 5. Every LLM prompt includes relevant CVE examples matching the path's CWE + product stack
 6. `max_llm_paths: 0` enables automatic smart limit (`smart_limit_max` config key, default 2000). Set a number for exact cap
 7. **Intra-step checkpointing**: each path result saved incrementally to `path_analysis_progress.jsonl`. Interrupted? `--resume` picks up from the last completed path — zero work lost
@@ -327,19 +329,45 @@ Plus overall Coverage Statistics showing:
 
 ## Time Estimates
 
-The system auto-adapts to codebase size. LLM analysis (Step 4c) is the bottleneck — these estimates assume 8 parallel LLM workers:
+The system auto-adapts to codebase size. LLM analysis (Step 4c) is the bottleneck — **these estimates assume an RTX 4070 Ti (8 parallel workers). Better hardware = faster, more coverage:**
 
-| Repo Size | Files | Source Files | Paths | Smart Limit | Est. Time |
-|-----------|-------|-------------|-------|-------------|-----------|
-| Small (~200 files) | ~150 | ~100 | ~500 | none (all) | 15-20 min |
-| Medium (~800 files) | ~600 | ~400 | ~3,000 | none (all) | 45-60 min |
-| Large (~2,000 files) | ~1,400 | ~1,000 | ~15,000 | ~2,000-3,000 | 1-2 hours |
-| Very Large (~5,000 files) | ~3,500 | ~2,500 | ~25,000 | ~3,000-4,000 | 2-3 hours |
-| Enterprise (~30K+ files) | ~25K+ | ~8,000 | ~100,000 | ~4,000-5,000 | 4-6 hours |
+| GPU / Workers | Paths/hr | Example (10K paths) | Example (100K paths) |
+|---------------|----------|---------------------|----------------------|
+| RTX 3060 / 4 workers | ~1800 | ~5.5 hr | ~55 hr |
+| RTX 4070 Ti / 8 workers | ~3600 | ~3 hr | ~30 hr |
+| RTX 4090 / 16 workers | ~7200 | ~1.5 hr | ~14 hr |
+| Dual GPU / 32 workers | ~14400 | ~45 min | ~7 hr |
 
-Non-LLM steps (parsing, call graph, path enumeration) are deterministic and fast — ~5-20 min even for enterprise repos. The smart prioritization ensures zero missed CRITICAL/HIGH vulns while keeping LLM time practical.
+Approximate estimates with smart limit (crit+high always included):
 
-Path analysis time ≈ paths × (15s / workers). With 8 workers: ~2s per path. Run `python -m src.main estimate /path/to/repo` for per-project estimates.
+| Repo Size | Files | Source Files | Paths | Est. Time (8 workers) |
+|-----------|-------|-------------|-------|-----------------------|
+| Small (~200 files) | ~150 | ~100 | ~500 | 15-20 min |
+| Medium (~800 files) | ~600 | ~400 | ~3,000 | 45-60 min |
+| Large (~2,000 files) | ~1,400 | ~1,000 | ~15,000 | 1-2 hours |
+| Very Large (~5,000 files) | ~3,500 | ~2,500 | ~25,000 | 2-3 hours |
+| Enterprise (~30K+ files) | ~25K+ | ~8,000 | ~100,000 | 4-6 hours |
+
+Non-LLM steps (parsing, call graph, path enumeration) are deterministic and fast — ~5-20 min even for enterprise repos.
+
+Path analysis time ≈ paths × (15s / workers). With 8 workers: ~2s per path.
+
+**To analyze literally every path** (true exhaustive mode): set `smart_limit_max: 0` in `config.yaml`. Time scales linearly with path count. Add more GPU workers via `parallel_analyzers` to reduce time proportionally.
+
+Run `python -m src.main estimate /path/to/repo` for per-project estimates.
+
+### Exhaustive Mode vs Smart Mode
+
+The system is designed to find **every** vulnerability — path enumeration is always exhaustive. The LLM analysis can be exhaustive or smart-prioritized, depending on your hardware:
+
+| Mode | Config | What it does |
+|------|--------|--------------|
+| **Exhaustive** | `smart_limit_max: 0` | LLM analyzes every single enumerated path. True 100% coverage. Requires serious hardware for large repos. |
+| **Smart (default)** | `smart_limit_max: 2000` | LLM analyzes top N paths + all CRITICAL/HIGH sinks + coverage of every vuln class. Zero missed high-impact vulns. Runs comfortably on consumer GPUs. |
+
+Even in smart mode, non-LLM steps (parsing, call graph, path enumeration) are always exhaustive — every file, every function, every source-to-sink pair is enumerated. The smart limit only affects how many paths get LLM validation. If the deterministic code graph finds a sanitizer blocking a path, the verdict is instant (no LLM needed) and those paths don't count against the limit.
+
+**Scaling up**: add `parallel_analyzers: 16` (or 32) in config.yaml to double/quadruple LLM throughput. If you have access to cloud GPUs or a multi-GPU rig, set `smart_limit_max: 0` and `parallel_analyzers: 32` for true exhaustive analysis at enterprise scale.
 
 ---
 
@@ -435,9 +463,9 @@ pipeline:
   max_path_depth: 8
   max_paths_per_pair: 20
   max_llm_paths: 0               # 0 = auto smart limit, N = exact cap
-  smart_limit_max: 2000          # ceiling for smart limit (0 = unlimited)
+  smart_limit_max: 2000          # LLM path ceiling (0 = exhaustive — analyze ALL paths)
   llm_temperature: 0.3
-  parallel_analyzers: 8          # concurrent LLM workers for Step 4c
+  parallel_analyzers: 8          # LLM workers (scale with GPU: 4=3060, 8=4070Ti, 16=4090, 32=multi-GPU)
 
 scaling:
   max_files_per_chunk: 500

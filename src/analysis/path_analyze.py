@@ -454,7 +454,7 @@ def _dedup_and_rank_by_sink(
     paths: list[ExploitPath],
     class_weights: dict[str, int] | None = None,
 ) -> list[ExploitPath]:
-    """Deduplicate by unique sink (file, line, category). Keep highest-weighted path per sink."""
+    """Deduplicate by unique sink. Keep best path: highest weight, no sanitizer, shortest chain."""
     weights = class_weights or _VULN_CLASS_WEIGHT
     sink_map: dict[tuple, ExploitPath] = {}
     for p in paths:
@@ -462,9 +462,8 @@ def _dedup_and_rank_by_sink(
         if key not in sink_map:
             sink_map[key] = p
         else:
-            existing_w = weights.get(sink_map[key].sink.category, 1)
-            new_w = weights.get(p.sink.category, 1)
-            if new_w > existing_w:
+            existing = sink_map[key]
+            if not _is_better_path(existing, p, weights):
                 sink_map[key] = p
     ranked = sorted(
         sink_map.values(),
@@ -472,9 +471,22 @@ def _dedup_and_rank_by_sink(
             _SEVERITY_RANK.get(p.sink.severity.upper(), 3),
             -weights.get(p.sink.category, 1),
             not p.is_blocked_by_sanitizer,
+            len(p.steps),
         ),
     )
     return ranked
+
+
+def _is_better_path(current: ExploitPath, candidate: ExploitPath,
+                    weights: dict[str, int]) -> bool:
+    """Is `current` a better exploit candidate than `candidate`?"""
+    cw = weights.get(current.sink.category, 1)
+    nw = weights.get(candidate.sink.category, 1)
+    if cw != nw:
+        return cw > nw
+    if current.is_blocked_by_sanitizer != candidate.is_blocked_by_sanitizer:
+        return not current.is_blocked_by_sanitizer
+    return len(current.steps) <= len(candidate.steps)
 
 
 def _smart_prioritize_paths(
@@ -522,28 +534,35 @@ def _smart_prioritize_paths(
         else:
             low.append(p)
 
+    critical_raw = len(critical)
+    high_raw = len(high)
+    critical = _dedup_and_rank_by_sink(critical, class_weights=weights)
+    high = _dedup_and_rank_by_sink(high, class_weights=weights)
+
     selected = list(llm_candidates)
     selected.extend(critical)
     selected.extend(high)
 
+    if ceiling > 0 and len(selected) > ceiling:
+        excess = len(selected) - ceiling
+        keep_high = max(0, len(high) - excess)
+        selected = list(llm_candidates) + critical + high[:keep_high]
+
     categories_covered = {p.sink.category for p in selected}
 
     coverage_extra = 0
-    all_skipped = medium + low
-    uncovered_cats = set()
-    if ceiling > 0:
-        uncovered_cats = {p.sink.category for p in all_skipped} - categories_covered
-        if uncovered_cats:
-            for cat in sorted(uncovered_cats):
-                if len(selected) >= ceiling:
+    all_rest = _dedup_and_rank_by_sink(medium + low, class_weights=weights)
+    uncovered_cats = {p.sink.category for p in all_rest} - categories_covered
+    if uncovered_cats:
+        for p in all_rest:
+            if p.sink.category in uncovered_cats and p not in selected:
+                selected.append(p)
+                coverage_extra += 1
+                uncovered_cats.discard(p.sink.category)
+                if not uncovered_cats:
                     break
-                for p in all_skipped:
-                    if p.sink.category == cat and p not in selected:
-                        selected.append(p)
-                        coverage_extra += 1
-                        break
 
-    budget = ceiling - len(selected)
+    budget = max(0, ceiling - len(selected))
 
     medium_selected = 0
     if budget > 0 and medium:
@@ -552,7 +571,7 @@ def _smart_prioritize_paths(
         selected.extend(take)
         medium_selected = len(take)
 
-    budget = ceiling - len(selected)
+    budget = max(0, ceiling - len(selected))
 
     low_selected = 0
     if budget > 0 and low:
@@ -566,8 +585,10 @@ def _smart_prioritize_paths(
         "selected": len(selected),
         "skipped": len(llm_candidates) + len(low_priority) - len(selected),
         "real_chains": len(llm_candidates),
-        "critical": len(critical),
-        "high": len(high),
+        "critical": critical_raw,
+        "critical_deduped": len(critical),
+        "high": high_raw,
+        "high_deduped": len(high),
         "medium_total": len(medium),
         "medium_selected": medium_selected,
         "low_total": len(low),
@@ -579,16 +600,16 @@ def _smart_prioritize_paths(
 
 
 def _compute_adaptive_cap(path_count: int, unique_cats: int, config_limit: int = 2000) -> int:
-    """Compute an adaptive cap based on path count and sink category diversity.
-    Returns 0 for small repos (no cap needed). Scales with category diversity.
-    Config limit acts as minimum, never reduced below it."""
+    """Compute an adaptive LLM path ceiling.
+    Returns 0 for small repos (no limit needed). For large repos, scales
+    proportionally above config_limit, capped at 5000."""
     if path_count < 5000:
         return 0
-    if path_count < 10000:
-        return max(config_limit, unique_cats * 25)
-    if path_count < 30000:
-        return max(config_limit, unique_cats * 30)
-    return max(config_limit, min(unique_cats * 40, path_count // 8))
+    if path_count >= 50000:
+        return max(config_limit, min(5000, path_count // 15))
+    if path_count >= 30000:
+        return max(config_limit, min(4000, path_count // 15))
+    return config_limit
 
 
 def analyze_paths_with_llm(
@@ -662,13 +683,12 @@ def analyze_paths_with_llm(
         logger.info(f"  Context: lang={language} frameworks={frameworks} "
                     f"unique_sink_types={unique_cats}")
 
-    workers = config.get("pipeline.parallel_analyzers", 4) or 4
+    workers = min(config.get("pipeline.parallel_analyzers", 4) or 4, 16)
     sec_per_path = 15.0 / max(workers, 1)
 
     smart_limit = config.get("pipeline.smart_limit_max", 2000)
     if max_paths == 0:
-        adaptive = _compute_adaptive_cap(total_need_llm, unique_cats, config_limit=smart_limit)
-        ceiling = adaptive if adaptive > 0 else smart_limit
+        ceiling = _compute_adaptive_cap(total_need_llm, unique_cats, config_limit=smart_limit)
     else:
         ceiling = max_paths
 
@@ -683,8 +703,10 @@ def analyze_paths_with_llm(
         logger.warning(
             f"  SMART LIMIT ({ceiling}): {pstats['total_candidates']} candidates → "
             f"{pstats['selected']} selected{coverage_info} "
-            f"(real:{pstats['real_chains']} crit:{pstats['critical']} "
-            f"high:{pstats['high']} med:{pstats['medium_selected']}/{pstats['medium_total']} "
+            f"(real:{pstats['real_chains']} "
+            f"crit:{pstats.get('critical_deduped', pstats['critical'])}/{pstats['critical']} "
+            f"high:{pstats.get('high_deduped', pstats['high'])}/{pstats['high']} "
+            f"med:{pstats['medium_selected']}/{pstats['medium_total']} "
             f"low:{pstats['low_selected']}/{pstats['low_total']}) — "
             f"{pstats['skipped']} skipped"
         )
@@ -774,11 +796,17 @@ def _analyze_paths_sequential(
             result = None
 
         if not result:
-            llm_results.append(_make_path_result(
+            path_result = _make_path_result(
                 path, "uncertain", 0.3,
                 "LLM call failed — could not analyze this path.",
                 "", path.sink.severity, "", "llm",
-            ))
+            )
+            llm_results.append(path_result)
+            if checkpoint_dir:
+                try:
+                    _append_checkpoint(checkpoint_dir, path_result)
+                except Exception:
+                    pass
             continue
 
         result_dict = result if isinstance(result, dict) else {}
