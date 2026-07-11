@@ -220,40 +220,44 @@ class PathEnumerator:
                                         all_paths.append(exploit_path)
                                         path_id += 1
 
-                        if not sink_func_keys and source_func_keys:
-                            for source_key in source_func_keys:
-                                exploit_path = self._build_exploit_path(
-                                    path_id=path_id,
-                                    source=source, sink=sink,
-                                    call_path=[source_key], call_graph=call_graph,
-                                    sanitizers_by_file=sanitizers_by_file,
-                                )
-                                if exploit_path:
-                                    all_paths.append(exploit_path)
-                                    path_id += 1
+                        has_source_func = bool(source_func_keys)
 
                         if not sink_func_keys:
-                            for source_key in source_func_keys:
-                                if sink.category in ("hardcoded_secret", "security_misconfig",
-                                                     "weak_crypto", "weak_random") and source_file != sink_file:
-                                    continue
-                                if sink.category in ("security_misconfig", "race_condition", "hardcoded_secret"):
-                                    exploit_path = ExploitPath(
-                                        path_id=f"P{path_id}",
+                            is_file_limited = sink.category in (
+                                "hardcoded_secret", "security_misconfig", "weak_crypto", "weak_random"
+                            )
+                            cross_file = source_file != sink_file
+                            if is_file_limited and cross_file:
+                                pass
+                            elif has_source_func:
+                                for source_key in source_func_keys:
+                                    exploit_path = self._build_exploit_path(
+                                        path_id=path_id,
                                         source=source, sink=sink,
-                                        steps=[PathStep(
-                                            function_key=source_key,
-                                            file=source.file,
-                                            line=0,
-                                            function_name=source_key.split("::")[-1],
-                                        )],
-                                        sanitizers_on_path=[],
-                                        cwe_id=sink.cwe_id,
-                                        is_exploitable=True,
-                                        is_blocked_by_sanitizer=False,
+                                        call_path=[source_key], call_graph=call_graph,
+                                        sanitizers_by_file=sanitizers_by_file,
                                     )
-                                    all_paths.append(exploit_path)
-                                    path_id += 1
+                                    if exploit_path:
+                                        all_paths.append(exploit_path)
+                                        path_id += 1
+                            else:
+                                exploit_path = ExploitPath(
+                                    path_id=f"P{path_id}",
+                                    source=source, sink=sink,
+                                    steps=[PathStep(
+                                        function_key=f"{source_file}::__module__",
+                                        file=source_file,
+                                        line=source.line,
+                                        function_name="<module-level>",
+                                        tainted_vars={source.variable, source.source_type},
+                                    )],
+                                    sanitizers_on_path=[],
+                                    cwe_id=sink.cwe_id,
+                                    is_exploitable=True,
+                                    is_blocked_by_sanitizer=False,
+                                )
+                                all_paths.append(exploit_path)
+                                path_id += 1
 
         self._add_module_level_sinks(
             all_paths, sources, sinks, sanitizers_by_file,
