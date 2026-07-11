@@ -1,16 +1,8 @@
-<pre align="center">
- _     ___   ____  ___ 
-| |   / / | / / / / _ \
-| |  / /| |/ / / / / ,_/
-| |_/ / |   / /_/ / /_  
-|___(_)|__/ \____/ ___/
-</pre>
+<p align="center">
+  <img src="https://img.shields.io/badge/LVRP-local--first-blue?style=for-the-badge" alt="LVRP">
+</p>
 
-# LVRP — Local Vuln Research Pipeline
-
-> Every source file reviewed. Every source-to-sink path traced. Every vulnerability found — locally, exhaustively, without a single API call.
-
----
+# LVRP - Local Vuln Research Pipeline
 
 Exhaustive LLM-driven whitebox vulnerability research pipeline that finds every single vulnerability in any source code. Built on a code graph + LLM hybrid architecture that enumerates and validates all source-to-sink paths.
 
@@ -196,7 +188,7 @@ Builds the complete foundation for exhaustive analysis:
 For every source-to-sink pair that is compatible:
 1. Use the call graph to find all call paths from source to sink
 2. Trace taint through each function on the path (intra-procedural + inter-procedural accumulation)
-3. Cross-reference sanitizers against sink categories using a normalized taxonomy — sanitizer `protected_against` values are mapped to sink categories via `SINK_TO_SANITIZER_TAXONOMY`
+3. Cross-reference sanitizers against sink categories using a normalized taxonomy -- sanitizer `protected_against` values are mapped to sink categories via `SINK_TO_SANITIZER_TAXONOMY`
 4. Blocked paths still proceed to LLM analysis (sanitizer effectiveness verified, not blind-trusted)
 5. Record the complete path inventory
 
@@ -209,12 +201,12 @@ For each enumerated path:
 2. Clear-cut cases get deterministic verdicts: sanitizer-taxonomy match → auto-BLOCKED, unreachable sink → auto-BLOCKED
 3. Only ambiguous paths go to the LLM (real function chains, taint present, no matching sanitizer)
 4. Every LLM prompt includes relevant CVE examples matching the path's CWE + product stack
-5. No limit by default — `max_llm_paths: 0` means analyze every unique path
+5. No limit by default -- `max_llm_paths: 0` means analyze every unique path
 6. Self-consistency: uncertain/low-confidence verdicts get 3 runs at temp 0.4; majority vote breaks the tie
 
 ### Step 4d: Blind Spot Coverage
 
-File-by-file LLM sweep for every source file NOT covered by path analysis. Uses an adversarial red-team prompt: *"You're the attacker who found a zero-day here last week. How do you break this file?"* Single-file focus, ranked by lethality (RCE > file ops > auth bypass > info disclosure). Explicitly skips safe-but-incomplete checks and theoretical issues — only reports concrete, exploitable findings.
+File-by-file LLM sweep for every source file NOT covered by path analysis. Uses an adversarial red-team prompt: *"You're the attacker who found a zero-day here last week. How do you break this file?"* Single-file focus, ranked by lethality (RCE > file ops > auth bypass > info disclosure). Explicitly skips safe-but-incomplete checks and theoretical issues -- only reports concrete, exploitable findings.
 
 ### Step 5: Memory Corruption + LLM Validation
 
@@ -225,12 +217,12 @@ Five deterministic analyzers (allocation, buffer, lifetime, integer overflow, fo
 Builds an attack graph from all confirmed exploitable findings using networkx:
 - Findings are classified by vulnerability role (code_exec, file_access, information_theft, access_escalation, etc.)
 - Role transitions define valid chains: file_access → code_exec (LFI to RCE), information_theft → access_escalation (credential reuse), etc.
-- Computes full transitive closure via graph shortest paths — A → C is valid if A → B → C exists
+- Computes full transitive closure via graph shortest paths -- A → C is valid if A → B → C exists
 - Chains up to 50 most confident multi-step exploits are surfaced
 
 ### Steps 7-9: Validation, Anomaly, Report
 
-- Step 7: Confidence-based filtering — CRITICAL and HIGH severity memory findings pass with >= 0.6 confidence; path analysis results are filtered by VERIFIED_EXPLOITABLE verdict
+- Step 7: Confidence-based filtering -- CRITICAL and HIGH severity memory findings pass with >= 0.6 confidence; path analysis results are filtered by VERIFIED_EXPLOITABLE verdict
 - Step 8: Prompt injection detection via InjectionGuard statistical baseline
 - Step 9: Exhaustive report with coverage statistics, PoC ideas, and remediation
 
