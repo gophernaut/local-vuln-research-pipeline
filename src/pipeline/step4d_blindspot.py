@@ -21,70 +21,60 @@ from src.utils.logger import get_logger
 
 logger = get_logger()
 
-MAX_FILES_PER_BATCH = 5
+MAX_FILES_PER_BATCH = 1
 MAX_FILE_SIZE = 15000
 
-BLIND_SPOT_PROMPT = """You are a senior security engineer doing a focused code review.
+BLIND_SPOT_PROMPT = """You are a red-team operator who found a zero-day in {target_name} last week. Now you're hunting for the next one.
 
-The codebase you're reviewing is: {target_name}
-Primary language: {primary_lang}
+Target: {target_name}
+Language: {primary_lang}
 Frameworks: {frameworks}
 
-KNOWN CVE PATTERNS for this tech stack:
+The team has been hit by these CVEs in similar products recently — use them as attack inspiration, not a checklist:
 {cve_context}
 
-You will receive {file_count} source file(s). For EACH file, review it for:
+You will receive 1 source file. Study it like an attacker would.
 
-CRITICAL CHECKS:
-- Hardcoded credentials, API keys, tokens, secrets
-- Command execution with dynamic arguments (exec, system, popen, process.start, invoke-expression)
-- SQL/NoSQL injection: dynamic queries with string concatenation
-- Path traversal: file paths built from user input (read/write/include/require)
-- Deserialization of untrusted data (pickle, yaml.load, ObjectInputStream, BinaryFormatter)
-- Server-Side Request Forgery: HTTP calls with user-controlled URLs
-- Authentication bypass: missing auth checks on sensitive endpoints
+THINK LIKE THIS: If I were exploiting this codebase right now, how would I break THIS file? What input does it receive? Where does that input go? What happens if I send something unexpected — null bytes, format strings, path separators, shell metacharacters, serialized objects, prototype pollution payloads, extremely long strings, negative numbers, type mismatches?
 
-IMPORTANT CHECKS (often missed):
-- Weak cryptography (MD5, SHA1 for security, static IV, ECB mode)
-- Weak/absent random for security tokens (Math.random, predictable seeds)
-- Race conditions / TOCTOU: file check then file use
-- Missing access controls: sensitive operations without permission checks
-- Insecure defaults: debug mode enabled, verbose errors, disabled TLS verification
-- Dangerous config: admin endpoints exposed, default credentials, CORS misconfiguration
-- Template injection: user data in templates without escaping
-- Commented-out dangerous code: old vulnerable code left as comments
-- Unsafe native calls: JNI, FFI, P/Invoke with user data
+FOCUS ON THESE ATTACK CLASSES (in order of lethality):
+1. Remote Code Execution — anything that lets me run commands or code
+2. File read/write — path traversal to read /etc/passwd or write a webshell
+3. Auth bypass — getting admin without credentials
+4. Information disclosure — leaking secrets, tokens, internal state
+5. Privilege escalation — user → admin, admin → system
 
-For EACH file, report ANY vulnerability found. Be specific: cite the exact line, explain
-what makes it dangerous, and describe how an attacker would exploit it.
+DO NOT report:
+- Missing input validation that isn't dangerous (e.g., no length check on a safe operation)
+- "Theoretical" issues with no concrete exploit path
+- Anything that requires already having root/system access
+- Issues you're not confident about
 
-If a file has NO vulnerabilities, say so explicitly. Don't invent issues.
+If you find a real vulnerability: describe the EXACT attack. What request/command would you send? What would happen? Be specific enough that a junior pentester could reproduce it.
+
+If the file is genuinely clean: say so in one sentence. Don't pad.
 
 OUTPUT FORMAT (valid JSON):
-{
-  "files": [
-    {
-      "file": "relative/path/to/file.ps1",
-      "has_vulnerability": true,
-      "findings": [
-        {
-          "line": 42,
-          "category": "command_injection",
-          "cwe": "CWE-78",
-          "severity": "CRITICAL",
-          "description": "What the issue is at that line",
-          "exploit_scenario": "How an attacker would exploit it",
-          "remediation": "How to fix it"
-        }
-      ]
-    },
-    {
-      "file": "relative/path/to/safe_file.cs",
-      "has_vulnerability": false,
-      "findings": []
-    }
+{{
+  "has_vulnerability": true,
+  "findings": [
+    {{
+      "line": 42,
+      "category": "command_injection",
+      "cwe": "CWE-78",
+      "severity": "CRITICAL",
+      "description": "What makes this exploitable at this exact line",
+      "exploit_scenario": "Step-by-step attack: the request/input, the data flow, the impact",
+      "remediation": "Concrete code fix"
+    }}
   ]
-}
+}}
+
+If no vulnerability found:
+{{
+  "has_vulnerability": false,
+  "findings": []
+}}
 """
 
 
@@ -101,22 +91,21 @@ def _build_blind_spot_batch(
     primary_lang = fingerprint.get("primary_language", "unknown")
     frameworks = ", ".join(fingerprint.get("frameworks", []) or ["none detected"])
 
-    cve_text = (cve_catalog.get("text") or "")[:1500]
+    cve_text = (cve_catalog.get("text") or "")[:1200]
 
     prompt = BLIND_SPOT_PROMPT.format(
         target_name=target_name,
         primary_lang=primary_lang,
         frameworks=frameworks,
         cve_context=cve_text or "(no CVE data available)",
-        file_count=len(file_batch),
     )
 
-    prompt += "\n=== SOURCE FILES TO REVIEW ===\n\n"
-    for f in file_batch:
-        prompt += f"--- FILE: {f['path']} ({f['language']}) ---\n"
-        content = (f.get("content") or "")[:MAX_FILE_SIZE]
-        prompt += content
-        prompt += "\n\n"
+    f = file_batch[0]
+    prompt += "\n=== SOURCE FILE TO REVIEW ===\n\n"
+    prompt += f"FILE: {f['path']} ({f['language']})\n\n"
+    content = (f.get("content") or "")[:MAX_FILE_SIZE]
+    prompt += content
+    prompt += "\n"
 
     return prompt
 
@@ -216,12 +205,11 @@ def run(
         }
 
     batches = _batch_files(uncovered)
-    logger.info(f"  {len(batches)} batches ({len(uncovered)} files, "
-                f"{MAX_FILES_PER_BATCH} per LLM call)")
+    logger.info(f"  {len(batches)} files to review (1 per LLM call)")
 
     max_batches = config.get("scaling.llm_priority_top_n", 1000)
     if len(batches) > max_batches:
-        logger.warning(f"  Capping at {max_batches} batches ({max_batches * MAX_FILES_PER_BATCH} files)")
+        logger.warning(f"  Capping at {max_batches} files ({max_batches * MAX_FILES_PER_BATCH})")
         batches = batches[:max_batches]
 
     client = LLMClient()
@@ -230,18 +218,17 @@ def run(
 
     system = f"""{GUARD_PREAMBLE}
 
-You are reviewing source code files for security vulnerabilities.
-Focus on real, exploitable issues. Don't flag things that are clearly safe.
-For each file, report findings in the exact JSON format requested.
+You are a red-team penetration tester. You have access to the source code of a target you're assessing. Review this file for real, exploitable vulnerabilities. Think like an attacker. Report only what you're confident about.
 """
 
     for i, batch in enumerate(batches):
         prompt = _build_blind_spot_batch(batch, threat_model, cve_catalog, repo_path)
+        file_info = batch[0]
 
         try:
-            result = client.chat_json(system, prompt, temperature=0.3, max_tokens=4096)
+            result = client.chat_json(system, prompt, temperature=0.4, max_tokens=4096)
         except Exception as e:
-            logger.warning(f"  Batch {i + 1}/{len(batches)} LLM call failed: {e}")
+            logger.warning(f"  File {i + 1}/{len(batches)} LLM call failed: {e}")
             errors += 1
             continue
 
@@ -249,24 +236,22 @@ For each file, report findings in the exact JSON format requested.
             errors += 1
             continue
 
-        files_section = result.get("files", [])
-        for fdata in files_section:
-            if fdata.get("has_vulnerability") and fdata.get("findings"):
-                for finding in fdata["findings"]:
-                    all_findings.append({
-                        "file": fdata.get("file", ""),
-                        "line": finding.get("line", 0),
-                        "category": finding.get("category", "unknown"),
-                        "cwe": finding.get("cwe", ""),
-                        "severity": finding.get("severity", "MEDIUM"),
-                        "description": finding.get("description", ""),
-                        "exploit_scenario": finding.get("exploit_scenario", ""),
-                        "remediation": finding.get("remediation", ""),
-                        "source": "file_review",
-                    })
+        if result.get("has_vulnerability") and result.get("findings"):
+            for finding in result["findings"]:
+                all_findings.append({
+                    "file": file_info.get("path", ""),
+                    "line": finding.get("line", 0),
+                    "category": finding.get("category", "unknown"),
+                    "cwe": finding.get("cwe", ""),
+                    "severity": finding.get("severity", "MEDIUM"),
+                    "description": finding.get("description", ""),
+                    "exploit_scenario": finding.get("exploit_scenario", ""),
+                    "remediation": finding.get("remediation", ""),
+                    "source": "file_review",
+                })
 
-        if (i + 1) % 20 == 0:
-            logger.info(f"  Reviewed {min((i + 1) * MAX_FILES_PER_BATCH, len(uncovered))}/{len(uncovered)} files")
+        if (i + 1) % 50 == 0:
+            logger.info(f"  Reviewed {i + 1}/{len(uncovered)} files ({len(all_findings)} findings)")
 
     elapsed = time.time() - t0
     logger.info(

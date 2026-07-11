@@ -351,28 +351,55 @@ Be specific. Cite exact lines. Don't pad with caveats. Make a decision.
                 temperature=temperature,
                 max_tokens=2048,
             )
+        except Exception:
+            result = None
 
-            if result:
-                result_dict = result if isinstance(result, dict) else {}
-                verdict = result_dict.get("verdict", "uncertain")
-                if verdict == "exploitable":
-                    verdict = "VERIFIED_EXPLOITABLE"
-                elif verdict == "blocked":
-                    verdict = "BLOCKED"
-
-                llm_results.append(_make_path_result(
-                    path, verdict,
-                    float(result_dict.get("confidence", 0.5)),
-                    result_dict.get("reasoning", ""),
-                    result_dict.get("exploit_scenario", ""),
-                    result_dict.get("severity", path.sink.severity),
-                    result_dict.get("poc_idea", ""),
-                    "llm",
-                ))
-
-        except Exception as e:
-            logger.warning(f"  LLM analysis failed for {path.path_id}: {e}")
+        if not result:
+            llm_results.append(_make_path_result(
+                path, "uncertain", 0.3,
+                "LLM call failed — could not analyze this path.",
+                "", path.sink.severity, "", "llm",
+            ))
             continue
+
+        result_dict = result if isinstance(result, dict) else {}
+        verdict = result_dict.get("verdict", "uncertain")
+        confidence = float(result_dict.get("confidence", 0.5))
+
+        if verdict == "exploitable":
+            verdict = "VERIFIED_EXPLOITABLE"
+        elif verdict == "blocked":
+            verdict = "BLOCKED"
+
+        if verdict == "uncertain" or confidence < 0.6:
+            logger.info(f"  Low confidence ({confidence}) for {path.path_id}, running self-consistency...")
+            try:
+                sc_result = client.self_consistent(
+                    system, prompt, runs=3, temperature=0.4,
+                )
+                if sc_result:
+                    sc_dict = sc_result if isinstance(sc_result, dict) else {}
+                    sc_verdict = sc_dict.get("verdict", "uncertain")
+                    if sc_verdict == "exploitable":
+                        sc_verdict = "VERIFIED_EXPLOITABLE"
+                    elif sc_verdict == "blocked":
+                        sc_verdict = "BLOCKED"
+                    if sc_verdict != "uncertain":
+                        verdict = sc_verdict
+                        confidence = max(confidence, float(sc_dict.get("confidence", confidence)))
+                        result_dict = sc_dict
+            except Exception:
+                pass
+
+        llm_results.append(_make_path_result(
+            path, verdict,
+            confidence,
+            result_dict.get("reasoning", ""),
+            result_dict.get("exploit_scenario", ""),
+            result_dict.get("severity", path.sink.severity),
+            result_dict.get("poc_idea", ""),
+            "llm",
+        ))
 
         if (i + 1) % 50 == 0:
             logger.info(f"  LLM analyzed {i + 1}/{len(llm_candidates)} paths")

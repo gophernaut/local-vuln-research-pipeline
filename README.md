@@ -198,32 +198,15 @@ For each enumerated path:
 3. Only ambiguous paths go to the LLM (real function chains, taint present, no matching sanitizer)
 4. Every LLM prompt includes relevant CVE examples matching the path's CWE + product stack
 5. No limit by default — `max_llm_paths: 0` means analyze every unique path
+6. Self-consistency: uncertain/low-confidence verdicts get 3 runs at temp 0.4; majority vote breaks the tie
 
-The LLM does not discover paths. It analyzes a path the graph already found.
+### Step 4d: Blind Spot Coverage
 
-### Step 4d: Blind Spot Coverage (Project Black Methodology)
+File-by-file LLM sweep for every source file NOT covered by path analysis. Uses an adversarial red-team prompt: *"You're the attacker who found a zero-day here last week. How do you break this file?"* Single-file focus, ranked by lethality (RCE > file ops > auth bypass > info disclosure). Explicitly skips safe-but-incomplete checks and theoretical issues — only reports concrete, exploitable findings.
 
-Code graph + path enumeration finds every data-flow vulnerability (injection, traversal, SSRF, deserialization). But some vulnerability classes don't follow a source-to-sink model — logic bugs, misconfigurations, auth gaps, weak crypto patterns the sink tagger doesn't recognize.
+### Step 5: Memory Corruption + LLM Validation
 
-Step 4d sweeps every source file NOT covered by path analysis, sending batches of 5 files through the LLM with CVE context and the full source code. The LLM reviews each file for:
-- Hardcoded credentials/secrets
-- Weak cryptography/random patterns
-- Auth check gaps and logic bugs
-- Insecure defaults and dangerous configurations
-- Race conditions and TOCTOU
-- Template injection and unsafe native calls
-- Commented-out dangerous code
-
-Between path enumeration (data-flow vulns) and blind-spot coverage (everything else), every line of every source file is reviewed.
-
-### Step 5: Memory Corruption Analysis
-
-For C/C++/Rust codebases, five dedicated analyzers:
-- Allocation tracker: integer overflow in size calculations, mismatched allocators
-- Buffer analyzer: stack/heap overflow, out-of-bounds access, off-by-one
-- Lifetime analyzer: use-after-free, double-free, invalid free
-- Integer overflow: overflow in size calculations, array indices
-- Format string: attacker-controlled format strings in printf/scanf family
+Five deterministic analyzers (allocation, buffer, lifetime, integer overflow, format string) flag memory issues via pattern matching on C/C++/Rust. CRITICAL/HIGH findings get LLM validation with source context around the flagged line: *"Real vulnerability or false positive given bounds check / safe API / language safety?"* Filters regex false positives before the report.
 
 ### Step 6: Chain Synthesis
 

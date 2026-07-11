@@ -344,7 +344,83 @@ class Orchestrator:
     def _step5_memory(self):
         code_graph = self.state.get("code_graph", {})
         memory_findings = code_graph.get("memory_findings", [])
-        return {"findings": memory_findings, "summary": {"total": len(memory_findings)}}
+        if not memory_findings:
+            return {"findings": memory_findings, "summary": {"total": 0, "llm_validated": 0}}
+
+        high_sev = [f for f in memory_findings if f.get("severity") in ("CRITICAL", "HIGH")]
+        if not high_sev:
+            return {"findings": memory_findings, "summary": {"total": len(memory_findings), "llm_validated": 0}}
+
+        from src.llm.client import LLMClient
+        client = LLMClient()
+        validated = []
+        llm_checked = 0
+
+        system = """You are a C/C++/Rust memory safety expert. Validate whether a reported memory corruption finding is a real exploitable vulnerability or a false positive.
+
+A REAL finding means: attacker-controlled data reaches the dangerous operation, and there is no effective bounds check, overflow guard, or safe API in the immediate context.
+
+A FALSE POSITIVE means: the operation is guarded by a nearby bounds check, the expression is provably safe, the language construct is memory-safe (Rust without unsafe), or the allocation size cannot overflow to a dangerous value.
+
+Be brutally honest. Don't keep a finding just because the regex says so. If the context shows it's safe, mark it as FALSE_POSITIVE."""
+
+        for f in high_sev:
+            filepath = Path(self.repo_path) / f.get("file", "")
+            if not filepath.exists():
+                validated.append(f)
+                continue
+            try:
+                source = filepath.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                validated.append(f)
+                continue
+
+            lines = source.split("\n")
+            line_num = f.get("line", 0)
+            start = max(0, line_num - 8)
+            end = min(len(lines), line_num + 5)
+            context = "\n".join(
+                f"{start + j + 1}: {l}"
+                for j, l in enumerate(lines[start:end])
+            )
+
+            prompt = f"""Validate this memory corruption finding:
+
+FINDING: {f.get('vulnerability_class', '')}
+DESCRIPTION: {f.get('description', '')}
+CWE: {f.get('cwe_id', '')}
+CONFIDENCE: {f.get('confidence', 0)}
+
+SOURCE CONTEXT:
+{context}
+
+Is this a REAL exploitable vulnerability or a FALSE POSITIVE? Check for bounds guards, safe APIs, language safety, and whether input is actually attacker-controlled.
+
+Output valid JSON:
+{{"verdict": "REAL" | "FALSE_POSITIVE", "confidence": 0.0-1.0, "reasoning": "why"}}"""
+
+            try:
+                result = client.chat_json(system, prompt, temperature=0.3, max_tokens=1024)
+                llm_checked += 1
+                if result and isinstance(result, dict):
+                    v = result.get("verdict", "")
+                    if v == "REAL":
+                        f_copy = dict(f)
+                        f_copy["llm_validated"] = True
+                        f_copy["llm_confidence"] = result.get("confidence", f.get("confidence"))
+                        validated.append(f_copy)
+                    else:
+                        logger.info(f"  LLM filtered FP: {f.get('file')}:{line_num} — {result.get('reasoning', '')[:120]}")
+                else:
+                    validated.append(f)
+            except Exception:
+                validated.append(f)
+
+        logger.info(f"  Memory LLM validation: {llm_checked} checked, "
+                    f"{len(validated)} passed ({len(high_sev) - len(validated)} FPs filtered)")
+
+        low_sev = [f for f in memory_findings if f.get("severity") not in ("CRITICAL", "HIGH")]
+        return {"findings": validated + low_sev, "summary": {"total": len(validated) + len(low_sev), "llm_validated": llm_checked}}
 
     def _step6_chains(self):
         from src.pipeline.step6_chains import run
