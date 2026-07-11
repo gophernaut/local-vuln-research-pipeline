@@ -313,6 +313,54 @@ def analyze_paths_with_llm(
 
     function_sources = _load_function_sources(all_llm, repo_path)
 
+    system = f"""{GUARD_PREAMBLE}
+
+You are an elite exploit developer performing per-path exploitability analysis.
+
+Your job: given a pre-traced source-to-sink path with the complete function code,
+determine if it is genuinely exploitable. You are NOT searching for vulns — the
+path has already been enumerated. You are validating ONE specific path.
+
+DECISION CRITERIA:
+- VERIFIED_EXPLOITABLE: Path is reachable, tainted data flows to sink, no
+  effective sanitizers, attacker can control data externally.
+- BLOCKED: Path has an effective sanitizer between source and sink, or the
+  sink is unreachable, or the data is sanitized before reaching the sink.
+- UNCERTAIN: Cannot determine without runtime info. Report what additional
+  evidence would be needed.
+
+Be specific. Cite exact lines. Don't pad with caveats. Make a decision.
+"""
+
+    client = LLMClient()
+    use_concurrent = config.get("pipeline.parallel_analyzers", 0) > 0
+
+    if use_concurrent and len(all_llm) > 10:
+        concurrency = min(config.get("pipeline.parallel_analyzers", 4), 16)
+        logger.info(f"  Using concurrent LLM analysis with {concurrency} workers")
+        llm_results = _analyze_paths_concurrent(
+            all_llm, system, function_sources, cve_catalog, temperature, client, concurrency,
+        )
+    else:
+        llm_results = _analyze_paths_sequential(
+            all_llm, system, function_sources, cve_catalog, temperature, client,
+        )
+
+    all_results = deterministic_results + llm_results
+    verified = sum(1 for r in all_results if r.verdict == "VERIFIED_EXPLOITABLE")
+    auto_blocked = sum(1 for r in deterministic_results if r.verdict == "BLOCKED")
+    llm_blocked = sum(1 for r in llm_results if r.verdict == "BLOCKED")
+    uncertain = sum(1 for r in all_results if r.verdict == "uncertain")
+
+    logger.info(
+        f"  Coverage complete: {len(all_results)} unique paths analyzed "
+        f"({verified} exploitable, {auto_blocked + llm_blocked} blocked "
+        f"[{auto_blocked} auto/{llm_blocked} llm], {uncertain} uncertain)"
+    )
+
+    return all_results
+
+
 def _analyze_paths_sequential(
     paths: list[ExploitPath],
     system: str,
@@ -472,53 +520,6 @@ def _analyze_paths_concurrent(
 
     logger.info(f"  Concurrent LLM analysis: {len(paths)} paths with {concurrency} workers")
     return llm_results
-
-    system = f"""{GUARD_PREAMBLE}
-
-You are an elite exploit developer performing per-path exploitability analysis.
-
-Your job: given a pre-traced source-to-sink path with the complete function code,
-determine if it is genuinely exploitable. You are NOT searching for vulns — the
-path has already been enumerated. You are validating ONE specific path.
-
-DECISION CRITERIA:
-- VERIFIED_EXPLOITABLE: Path is reachable, tainted data flows to sink, no
-  effective sanitizers, attacker can control data externally.
-- BLOCKED: Path has an effective sanitizer between source and sink, or the
-  sink is unreachable, or the data is sanitized before reaching the sink.
-- UNCERTAIN: Cannot determine without runtime info. Report what additional
-  evidence would be needed.
-
-Be specific. Cite exact lines. Don't pad with caveats. Make a decision.
-"""
-
-    client = LLMClient()
-    use_concurrent = config.get("pipeline.parallel_analyzers", 0) > 0
-
-    if use_concurrent and len(all_llm) > 10:
-        concurrency = min(config.get("pipeline.parallel_analyzers", 4), 16)
-        logger.info(f"  Using concurrent LLM analysis with {concurrency} workers")
-        llm_results = _analyze_paths_concurrent(
-            all_llm, system, function_sources, cve_catalog, temperature, client, concurrency,
-        )
-    else:
-        llm_results = _analyze_paths_sequential(
-            all_llm, system, function_sources, cve_catalog, temperature, client,
-        )
-
-    all_results = deterministic_results + llm_results
-    verified = sum(1 for r in all_results if r.verdict == "VERIFIED_EXPLOITABLE")
-    auto_blocked = sum(1 for r in deterministic_results if r.verdict == "BLOCKED")
-    llm_blocked = sum(1 for r in llm_results if r.verdict == "BLOCKED")
-    uncertain = sum(1 for r in all_results if r.verdict == "uncertain")
-
-    logger.info(
-        f"  Coverage complete: {len(all_results)} unique paths analyzed "
-        f"({verified} exploitable, {auto_blocked + llm_blocked} blocked "
-        f"[{auto_blocked} auto/{llm_blocked} llm], {uncertain} uncertain)"
-    )
-
-    return all_results
 
 
 def analyze_paths(
