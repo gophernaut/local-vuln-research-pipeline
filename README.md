@@ -200,9 +200,15 @@ For each enumerated path:
 1. Paths are deduplicated by unique (source, sink, category) combination
 2. Clear-cut cases get deterministic verdicts: sanitizer-taxonomy match → auto-BLOCKED, unreachable sink → auto-BLOCKED
 3. Only ambiguous paths go to the LLM (real function chains, taint present, no matching sanitizer)
-4. Every LLM prompt includes relevant CVE examples matching the path's CWE + product stack
-5. No limit by default -- `max_llm_paths: 0` means analyze every unique path
-6. Self-consistency: uncertain/low-confidence verdicts get 3 runs at temp 0.4; majority vote breaks the tie
+4. **Smart prioritization**: when path count exceeds limit, a context-aware ranking ensures:
+   - ALL CRITICAL + HIGH severity paths always analyzed (zero missed high-impact vulns)
+   - Coverage guarantee: ≥1 path per unique sink category in the codebase
+   - Context-aware vuln class weights: Python repos boost SSTI/deserialization; C repos boost memory corruption; Java repos boost deserialization/SpEL
+   - Adaptive cap scales with codebase size — small repos (<5000 paths) analyze everything
+5. Every LLM prompt includes relevant CVE examples matching the path's CWE + product stack
+6. `max_llm_paths: 0` enables automatic smart limit (`smart_limit_max` config key, default 2000). Set a number for exact cap
+7. **Intra-step checkpointing**: each path result saved incrementally to `path_analysis_progress.jsonl`. Interrupted? `--resume` picks up from the last completed path — zero work lost
+8. Self-consistency: uncertain/low-confidence verdicts get 3 runs at temp 0.4; majority vote breaks the tie
 
 ### Step 4d: Blind Spot Coverage
 
@@ -321,17 +327,19 @@ Plus overall Coverage Statistics showing:
 
 ## Time Estimates
 
-The system auto-adapts to codebase size:
+The system auto-adapts to codebase size. LLM analysis (Step 4c) is the bottleneck — these estimates assume 8 parallel LLM workers:
 
-| Repo Size | Files | Config | Est. Time |
-|-----------|-------|--------|-----------|
-| Small (~200 files) | ~150 | minimal | 15-25 min |
-| Medium (~800 files) | ~600 | standard | 1-2 hours |
-| Large (~2000 files) | ~1400 | large | 3-6 hours |
-| Very Large (~5000 files) | ~3500 | large | 6-12 hours |
-| Enterprise (~30K+ files) | ~25K+ | enterprise | 24-72 hours |
+| Repo Size | Files | Source Files | Paths | Smart Limit | Est. Time |
+|-----------|-------|-------------|-------|-------------|-----------|
+| Small (~200 files) | ~150 | ~100 | ~500 | none (all) | 15-20 min |
+| Medium (~800 files) | ~600 | ~400 | ~3,000 | none (all) | 45-60 min |
+| Large (~2,000 files) | ~1,400 | ~1,000 | ~15,000 | ~2,000-3,000 | 1-2 hours |
+| Very Large (~5,000 files) | ~3,500 | ~2,500 | ~25,000 | ~3,000-4,000 | 2-3 hours |
+| Enterprise (~30K+ files) | ~25K+ | ~8,000 | ~100,000 | ~4,000-5,000 | 4-6 hours |
 
-Each batch = 3 LLM calls. Time scales linearly. Checkpoint and resume at every batch.
+Non-LLM steps (parsing, call graph, path enumeration) are deterministic and fast — ~5-20 min even for enterprise repos. The smart prioritization ensures zero missed CRITICAL/HIGH vulns while keeping LLM time practical.
+
+Path analysis time ≈ paths × (15s / workers). With 8 workers: ~2s per path. Run `python -m src.main estimate /path/to/repo` for per-project estimates.
 
 ---
 
@@ -350,9 +358,12 @@ The system includes a dedicated scaling module (`src/analysis/scaling.py`):
 - Configurable worker count (default 16, up to 32 for enterprise)
 
 ### Path Prioritization
-- Paths scored by severity, vulnerability class, length, sanitizer presence
-- Top N paths analyzed by LLM (configurable, default 500)
-- Strategic sampling when budget is limited: all CRITICAL, all HIGH, sample of MEDIUM
+- Paths scored by severity, vulnerability class weight (context-aware by language/framework), function chain depth, and sanitizer presence
+- **Zero missed CRITICAL/HIGH**: all CRITICAL and HIGH severity paths always analyzed, regardless of limit
+- **Coverage guarantee**: ≥1 path per unique sink category found in the codebase — no entire vuln class is ever skipped
+- **Context-aware weights**: C repos boost memory corruption; Python repos boost SSTI/deserialization; Java repos boost serialization/SpEL; JS repos boost prototype pollution/NoSQL
+- Smart limit auto-activates when paths exceed `smart_limit_max` (default 2000). Set `smart_limit_max: 0` for unlimited
+- Deduplication by unique sink (file + line + category) prevents analyzing the same dangerous operation multiple times
 
 ### Memory Management
 - Streaming report writer (findings written incrementally)
@@ -361,12 +372,14 @@ The system includes a dedicated scaling module (`src/analysis/scaling.py`):
 
 ### Adaptive Configuration
 
-| Files | Config Profile | LLM Paths | Workers |
-|-------|---------------|-----------|---------|
+| Files | Config Profile | Smart Limit | Workers |
+|-------|---------------|-------------|---------|
 | Under 100 | minimal | 200 | 4 |
 | Under 1000 | standard | 500 | 8 |
 | Under 10000 | large | 1000 | 16 |
-| 10000+ | enterprise | 2000 | 32 |
+| 10000+ | enterprise | 2000 (adaptive) | 32 |
+
+Smart limit is a ceiling, not a quota — CRITICAL+HIGH paths are always included regardless of the limit.
 
 Run `python -m src.main estimate /path/to/repo` to see estimated scope and time for any target.
 
@@ -374,15 +387,20 @@ Run `python -m src.main estimate /path/to/repo` to see estimated scope and time 
 
 ## Checkpointing
 
+Full step-level checkpoints + intra-step incremental checkpoint for Step 4c (the longest step):
+
 ```
 data/checkpoints/<hash>/
-├── progress.md              Human-readable: batch 87/450, 23 candidates
-├── code_graph.json          Complete code graph
-├── path_enum.json           All source-to-sink paths
-├── path_analysis.json       Per-path LLM results
-├── chains.json              Exploit chains
-├── report.md                Final report
+├── progress.md                     Human-readable: batch 87/450, 23 candidates
+├── code_graph.json                 Complete code graph
+├── path_enum.json                  All source-to-sink paths
+├── path_analysis_progress.jsonl    [NEW] Incremental checkpoint: one line per analyzed path
+├── path_analysis.json              Final merged per-path LLM results
+├── chains.json                     Exploit chains
+├── report.md                       Final report
 ```
+
+`path_analysis_progress.jsonl` is written atomically after each path is analyzed. If the process is interrupted (Ctrl+C, crash, power loss) during Step 4c, `--resume` picks up from the last completed path — zero work lost. No more restarting from scratch.
 
 ---
 
@@ -416,8 +434,10 @@ server:
 pipeline:
   max_path_depth: 8
   max_paths_per_pair: 20
-  max_llm_paths: 500
+  max_llm_paths: 0               # 0 = auto smart limit, N = exact cap
+  smart_limit_max: 2000          # ceiling for smart limit (0 = unlimited)
   llm_temperature: 0.3
+  parallel_analyzers: 8          # concurrent LLM workers for Step 4c
 
 scaling:
   max_files_per_chunk: 500

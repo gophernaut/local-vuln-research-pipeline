@@ -387,8 +387,10 @@ class Orchestrator:
         from src.pipeline.step4c_path_analyze import run
         threat_model = self.state.get("threat_model", {})
         cve_catalog = threat_model.get("cve_catalog", {})
+        classification = self.state.get("classification", {})
         return run(self.repo_path, self.state.get("path_enum", {}),
-                   cve_catalog=cve_catalog, checkpoint_dir=self.checkpoint_dir)
+                   cve_catalog=cve_catalog, checkpoint_dir=self.checkpoint_dir,
+                   classification=classification)
 
     def _step4d(self):
         from src.pipeline.step4d_blindspot import run

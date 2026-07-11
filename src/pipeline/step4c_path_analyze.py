@@ -65,7 +65,8 @@ def _reconstruct_paths(path_data: list | dict) -> list[ExploitPath]:
 
 
 def run(repo_path: Path, path_data: dict, cve_catalog: dict | None = None,
-        checkpoint_dir: Path | None = None) -> dict[str, Any]:
+        checkpoint_dir: Path | None = None,
+        classification: dict | None = None) -> dict[str, Any]:
     logger.info("Step 4c: Per-path LLM analysis...")
 
     t0 = time.time()
@@ -123,6 +124,7 @@ def run(repo_path: Path, path_data: dict, cve_catalog: dict | None = None,
         cve_catalog=cve_catalog,
         completed_ids=completed_ids or None,
         checkpoint_dir=checkpoint_dir,
+        classification=classification,
     )
 
     results = existing_results + new_results

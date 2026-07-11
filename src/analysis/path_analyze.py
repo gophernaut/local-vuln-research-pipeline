@@ -377,6 +377,220 @@ def load_checkpoint_results(checkpoint_dir: Path) -> tuple[list[PathAnalysisResu
     return results, completed_ids
 
 
+_VULN_CLASS_WEIGHT = {
+    "command_execution": 10, "code_execution": 10, "deserialization": 9,
+    "sql_injection": 8, "auth_bypass": 8, "template_injection": 7,
+    "spel_injection": 7, "command_injection": 7,
+    "ssrf": 6, "xxe": 6, "file_inclusion": 6, "reflection_invoke": 6,
+    "path_traversal": 5, "file_write": 5, "race_condition": 5,
+    "nosql_injection": 5, "buffer_overflow": 5, "format_string": 5,
+    "graphql_injection": 4, "ldap_injection": 4, "xpath_injection": 4,
+    "prototype_pollution": 4, "integer_overflow": 4, "unsafe_block": 4,
+    "hardcoded_secret": 3, "file_read": 3,
+    "weak_crypto": 2, "weak_random": 2, "insecure_crypto": 2,
+}
+
+_SEVERITY_RANK = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3, "INFO": 4}
+
+
+def _get_context_weights(language: str = "", frameworks: list | None = None) -> dict[str, int]:
+    """Adapt vuln class weights to codebase context. Boosts classes most relevant to
+    the detected language and frameworks."""
+    w = dict(_VULN_CLASS_WEIGHT)
+    lang = (language or "").lower()
+    fw_text = " ".join(str(f).lower() for f in (frameworks or []))
+
+    if lang in ("c", "c++"):
+        w["buffer_overflow"] = w.get("buffer_overflow", 2) + 5
+        w["format_string"] = w.get("format_string", 2) + 5
+        w["integer_overflow"] = w.get("integer_overflow", 2) + 5
+        w["race_condition"] = w.get("race_condition", 2) + 3
+    elif lang == "python":
+        w["deserialization"] = w.get("deserialization", 5) + 2
+        w["template_injection"] = w.get("template_injection", 5) + 2
+        w["command_execution"] = w.get("command_execution", 7) + 1
+    elif lang in ("javascript", "typescript"):
+        w["prototype_pollution"] = w.get("prototype_pollution", 2) + 5
+        w["nosql_injection"] = w.get("nosql_injection", 3) + 4
+        w["ssrf"] = w.get("ssrf", 4) + 2
+        w["template_injection"] = w.get("template_injection", 5) + 2
+    elif lang == "java":
+        w["deserialization"] = w.get("deserialization", 5) + 5
+        w["spel_injection"] = w.get("spel_injection", 4) + 5
+        w["sql_injection"] = w.get("sql_injection", 6) + 2
+    elif lang == "c#":
+        w["deserialization"] = w.get("deserialization", 5) + 3
+        w["command_execution"] = w.get("command_execution", 7) + 2
+    elif lang == "go":
+        w["race_condition"] = w.get("race_condition", 2) + 4
+        w["command_execution"] = w.get("command_execution", 7) + 2
+    elif lang == "rust":
+        w["unsafe_block"] = w.get("unsafe_block", 3) + 5
+        w["ffi"] = w.get("ffi", 1) + 4
+        w["integer_overflow"] = w.get("integer_overflow", 2) + 3
+
+    if "django" in fw_text:
+        w["sql_injection"] = w.get("sql_injection", 6) + 2
+        w["template_injection"] = w.get("template_injection", 5) + 1
+    if "flask" in fw_text or "fastapi" in fw_text:
+        w["template_injection"] = w.get("template_injection", 5) + 2
+        w["ssrf"] = w.get("ssrf", 4) + 1
+    if "spring" in fw_text:
+        w["spel_injection"] = w.get("spel_injection", 4) + 5
+        w["deserialization"] = w.get("deserialization", 5) + 3
+    if "express" in fw_text:
+        w["nosql_injection"] = w.get("nosql_injection", 3) + 3
+        w["command_execution"] = w.get("command_execution", 7) + 1
+    if "rails" in fw_text:
+        w["deserialization"] = w.get("deserialization", 5) + 4
+        w["sql_injection"] = w.get("sql_injection", 6) + 1
+    if "ruby" in fw_text or lang == "ruby":
+        w["deserialization"] = w.get("deserialization", 5) + 3
+
+    return w
+
+
+def _dedup_and_rank_by_sink(
+    paths: list[ExploitPath],
+    class_weights: dict[str, int] | None = None,
+) -> list[ExploitPath]:
+    """Deduplicate by unique sink (file, line, category). Keep highest-weighted path per sink."""
+    weights = class_weights or _VULN_CLASS_WEIGHT
+    sink_map: dict[tuple, ExploitPath] = {}
+    for p in paths:
+        key = (p.sink.file, p.sink.line, p.sink.category)
+        if key not in sink_map:
+            sink_map[key] = p
+        else:
+            existing_w = weights.get(sink_map[key].sink.category, 1)
+            new_w = weights.get(p.sink.category, 1)
+            if new_w > existing_w:
+                sink_map[key] = p
+    ranked = sorted(
+        sink_map.values(),
+        key=lambda p: (
+            _SEVERITY_RANK.get(p.sink.severity.upper(), 3),
+            -weights.get(p.sink.category, 1),
+            not p.is_blocked_by_sanitizer,
+        ),
+    )
+    return ranked
+
+
+def _smart_prioritize_paths(
+    llm_candidates: list[ExploitPath],
+    low_priority: list[ExploitPath],
+    ceiling: int,
+    class_weights: dict[str, int] | None = None,
+) -> tuple[list[ExploitPath], dict[str, int]]:
+    """
+    Smart prioritization that guarantees zero missed CRITICAL/HIGH vulns
+    and ensures coverage of all unique sink categories in the codebase.
+
+    Strategy:
+    1. ALL real function chain paths (llm_candidates) — always included
+    2. ALL CRITICAL severity from low_priority — always included
+    3. ALL HIGH severity from low_priority — always included
+    4. At least 1 path per unique sink category NOT covered by tiers 1-3
+    5. MEDIUM — dedup by sink, rank by vuln class, fill remaining budget
+    6. LOW — only if budget remains after all above
+    """
+    weights = class_weights or _VULN_CLASS_WEIGHT
+
+    if not low_priority:
+        stats = {
+            "total_candidates": len(llm_candidates),
+            "selected": len(llm_candidates),
+            "skipped": 0,
+            "real_chains": len(llm_candidates),
+            "critical": 0, "high": 0,
+            "medium_total": 0, "medium_selected": 0,
+            "low_total": 0, "low_selected": 0,
+            "coverage_extra": 0,
+        }
+        return list(llm_candidates), stats
+
+    critical, high, medium, low = [], [], [], []
+    for p in low_priority:
+        sev = p.sink.severity.upper()
+        if sev == "CRITICAL":
+            critical.append(p)
+        elif sev == "HIGH":
+            high.append(p)
+        elif sev == "MEDIUM":
+            medium.append(p)
+        else:
+            low.append(p)
+
+    selected = list(llm_candidates)
+    selected.extend(critical)
+    selected.extend(high)
+
+    categories_covered = {p.sink.category for p in selected}
+
+    coverage_extra = 0
+    all_skipped = medium + low
+    uncovered_cats = set()
+    if ceiling > 0:
+        uncovered_cats = {p.sink.category for p in all_skipped} - categories_covered
+        if uncovered_cats:
+            for cat in sorted(uncovered_cats):
+                if len(selected) >= ceiling:
+                    break
+                for p in all_skipped:
+                    if p.sink.category == cat and p not in selected:
+                        selected.append(p)
+                        coverage_extra += 1
+                        break
+
+    budget = ceiling - len(selected)
+
+    medium_selected = 0
+    if budget > 0 and medium:
+        ranked = _dedup_and_rank_by_sink(medium, class_weights=weights)
+        take = [p for p in ranked if p not in selected][:budget]
+        selected.extend(take)
+        medium_selected = len(take)
+
+    budget = ceiling - len(selected)
+
+    low_selected = 0
+    if budget > 0 and low:
+        ranked = _dedup_and_rank_by_sink(low, class_weights=weights)
+        take = [p for p in ranked if p not in selected][:budget]
+        selected.extend(take)
+        low_selected = len(take)
+
+    stats = {
+        "total_candidates": len(llm_candidates) + len(low_priority),
+        "selected": len(selected),
+        "skipped": len(llm_candidates) + len(low_priority) - len(selected),
+        "real_chains": len(llm_candidates),
+        "critical": len(critical),
+        "high": len(high),
+        "medium_total": len(medium),
+        "medium_selected": medium_selected,
+        "low_total": len(low),
+        "low_selected": low_selected,
+        "coverage_extra": coverage_extra,
+    }
+
+    return selected, stats
+
+
+def _compute_adaptive_cap(path_count: int, unique_cats: int, config_limit: int = 2000) -> int:
+    """Compute an adaptive cap based on path count and sink category diversity.
+    Returns 0 for small repos (no cap needed). Scales with category diversity.
+    Config limit acts as minimum, never reduced below it."""
+    if path_count < 5000:
+        return 0
+    if path_count < 10000:
+        return max(config_limit, unique_cats * 25)
+    if path_count < 30000:
+        return max(config_limit, unique_cats * 30)
+    return max(config_limit, min(unique_cats * 40, path_count // 8))
+
+
 def analyze_paths_with_llm(
     paths: list[ExploitPath],
     repo_path: Path,
@@ -385,10 +599,9 @@ def analyze_paths_with_llm(
     cve_catalog: dict | None = None,
     completed_ids: set[str] | None = None,
     checkpoint_dir: Path | None = None,
+    classification: dict | None = None,
 ) -> list[PathAnalysisResult]:
     logger.info(f"Analyzing {len(paths)} enumerated paths")
-
-    sev_value = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
 
     deterministic_results: list[PathAnalysisResult] = []
     llm_candidates: list[ExploitPath] = []
@@ -423,47 +636,65 @@ def analyze_paths_with_llm(
 
     all_llm = llm_candidates + low_priority
 
+    llm_candidates = [p for p in llm_candidates
+                      if p.path_id not in completed_ids] if completed_ids else llm_candidates
+    low_priority = [p for p in low_priority
+                    if p.path_id not in completed_ids] if completed_ids else low_priority
+
     if completed_ids:
-        before_count = len(all_llm)
-        all_llm = [p for p in all_llm if p.path_id not in completed_ids]
-        skipped = before_count - len(all_llm)
+        skipped = len(all_llm) - len(llm_candidates) - len(low_priority)
         if skipped:
             logger.info(f"  Checkpoint resume: skipping {skipped} already-analyzed paths")
+
+    total_need_llm = len(llm_candidates) + len(low_priority)
+    unique_cats = len({p.sink.category for p in (llm_candidates + low_priority)})
+
+    key_signals = (classification or {}).get("key_signals", {})
+    language = key_signals.get("language", "")
+    frameworks = key_signals.get("frameworks", [])
+    class_weights = _get_context_weights(language, frameworks)
 
     logger.info(f"  Dedup: {len(paths)} raw → {len(seen_combos)} unique "
                 f"(+{len(deterministic_results)} structurally invalid, "
                 f"{len(llm_candidates)} direct, {len(low_priority)} module-level)")
 
-    if max_paths > 0 and len(all_llm) > max_paths:
-        logger.warning(f"  {len(all_llm)} paths need LLM but max_llm_paths={max_paths}. "
-                       f"Sampling top {max_paths}. Set max_llm_paths: 0 in config.yaml for unlimited.")
+    if language or frameworks:
+        logger.info(f"  Context: lang={language} frameworks={frameworks} "
+                    f"unique_sink_types={unique_cats}")
 
-        scored = []
-        for p in llm_candidates:
-            sev = sev_value.get(p.sink.severity.upper(), 0)
-            scored.append((sev + 5, p))
-        for p in low_priority:
-            sev = sev_value.get(p.sink.severity.upper(), 0)
-            scored.append((sev, p))
-        scored.sort(key=lambda x: x[0], reverse=True)
+    workers = config.get("pipeline.parallel_analyzers", 4) or 4
+    sec_per_path = 15.0 / max(workers, 1)
 
-        seen_sinks = set()
-        priority = []
-        for _score, p in scored:
-            sk = f"{p.sink.file}:{p.sink.line}:{p.sink.category}"
-            if sk not in seen_sinks:
-                seen_sinks.add(sk)
-                priority.append(p)
-                if len(priority) >= max_paths:
-                    break
-        remaining = max_paths - len(priority)
-        if remaining > 0:
-            for _score, p in scored:
-                if p not in priority:
-                    priority.append(p)
-                    if len(priority) >= max_paths:
-                        break
-        all_llm = priority
+    smart_limit = config.get("pipeline.smart_limit_max", 2000)
+    if max_paths == 0:
+        adaptive = _compute_adaptive_cap(total_need_llm, unique_cats, config_limit=smart_limit)
+        ceiling = adaptive if adaptive > 0 else smart_limit
+    else:
+        ceiling = max_paths
+
+    if ceiling > 0 and total_need_llm > ceiling:
+        all_llm, pstats = _smart_prioritize_paths(
+            llm_candidates, low_priority, ceiling, class_weights=class_weights,
+        )
+        total_est = int(total_need_llm * sec_per_path / 60)
+        smart_est = int(pstats["selected"] * sec_per_path / 60)
+        coverage_info = f" coverage:+{pstats['coverage_extra']}" if pstats.get("coverage_extra") else ""
+
+        logger.warning(
+            f"  SMART LIMIT ({ceiling}): {pstats['total_candidates']} candidates → "
+            f"{pstats['selected']} selected{coverage_info} "
+            f"(real:{pstats['real_chains']} crit:{pstats['critical']} "
+            f"high:{pstats['high']} med:{pstats['medium_selected']}/{pstats['medium_total']} "
+            f"low:{pstats['low_selected']}/{pstats['low_total']}) — "
+            f"{pstats['skipped']} skipped"
+        )
+        logger.warning(
+            f"  Est LLM time ({workers} workers): unlimited ~{total_est}m | "
+            f"smart ~{smart_est}m. "
+            f"Config: smart_limit_max={smart_limit} max_llm_paths={max_paths}"
+        )
+    else:
+        all_llm = llm_candidates + low_priority
 
     function_sources = _load_function_sources(all_llm, repo_path)
 
