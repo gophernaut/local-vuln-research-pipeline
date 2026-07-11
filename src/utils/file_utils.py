@@ -9,6 +9,8 @@ IGNORE_PATTERNS = {
     ".git", "node_modules", "__pycache__", ".venv", "venv",
     ".idea", ".vscode", "target", "build", "dist", ".gradle",
     "vendor", ".next", ".nuxt", "coverage", ".pytest_cache",
+    "test", "tests", "spec", "__tests__", "benchmarks", "examples",
+    "fixtures", "mocks", "stubs", ".tox", ".mypy_cache",
     "*.pyc", "*.pyo", "*.class", "*.o", "*.so", "*.dll",
     "*.exe", "*.dylib", "*.wasm", "*.min.js", "*.min.css",
     "*.map", "*.lock", "package-lock.json", "yarn.lock",

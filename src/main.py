@@ -142,7 +142,7 @@ def _cmd_audit(repo_path: str, resume: bool):
 
 def _cmd_estimate(repo_path: str):
     from pathlib import Path
-    from src.analysis.scaling import LargeCodebaseAdapter
+    from src.analysis.scaling import LargeCodebaseAdapter, ChunkedFileProcessor
 
     target = Path(repo_path).resolve()
     if not target.exists():
@@ -151,21 +151,16 @@ def _cmd_estimate(repo_path: str):
 
     print(f"\n=== Scan Estimate: {target} ===\n")
 
-    files = []
-    total_size = 0
-    for f in target.rglob("*"):
-        if f.is_file() and f.suffix:
-            try:
-                size = f.stat().st_size
-                total_size += size
-                files.append(f)
-            except OSError:
-                pass
+    adapter = LargeCodebaseAdapter()
+    processor = ChunkedFileProcessor(adapter.config)
+    files = processor.list_files(target)
 
-    size_mb = total_size / (1024 * 1024)
+    total_size = sum(
+        f.stat().st_size for f in files
+    ) if files else 0
+    size_mb = total_size / (1024 * 1024) if files else 0.0
     file_count = len(files)
 
-    adapter = LargeCodebaseAdapter()
     config = adapter.get_adaptive_config(size_mb, file_count)
     resources = adapter.estimate_resources(file_count, config)
 

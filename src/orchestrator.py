@@ -79,14 +79,14 @@ class Orchestrator:
 
     def _adapt_to_repo_size(self) -> Any:
         try:
-            from src.analysis.scaling import LargeCodebaseAdapter
+            from src.analysis.scaling import LargeCodebaseAdapter, ChunkedFileProcessor
             adapter = LargeCodebaseAdapter()
-            files = list(self.repo_path.rglob("*"))
-            file_count = sum(1 for f in files if f.is_file() and f.suffix)
+            processor = ChunkedFileProcessor(adapter.config)
+            files = processor.list_files(self.repo_path)
+            file_count = len(files)
             total_size = sum(
                 f.stat().st_size for f in files
-                if f.is_file() and f.suffix
-            ) / (1024 * 1024)
+            ) / (1024 * 1024) if files else 0.0
 
             logger.info(f"Repository size: {file_count} files, {total_size:.1f} MB")
             return adapter.get_adaptive_config(total_size, file_count)
