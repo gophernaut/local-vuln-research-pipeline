@@ -34,7 +34,7 @@ pipeline:
   self_consistency_runs: 3
   max_deep_trace_files: 20
   early_termination: true
-  parallel_analyzers: 5
+  parallel_analyzers: 8
   max_path_depth: 0
   max_paths_per_pair: 0
   max_llm_paths: 0

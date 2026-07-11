@@ -429,6 +429,7 @@ class LargeCodebaseAdapter:
             sc.max_paths_total = 100_000
             sc.max_llm_paths = 1000 if max_llm_paths_override < 0 else max_llm_paths_override
             sc.num_workers = min(16, (os.cpu_count() or 4) * 2)
+            sc.llm_batch_size = 32
         else:
             sc.max_paths_total = 200_000
             sc.max_llm_paths = 2000 if max_llm_paths_override < 0 else max_llm_paths_override
