@@ -19,9 +19,13 @@ from src.config import config
 logger = get_logger()
 
 
-def _reconstruct_paths(path_data: dict) -> list[ExploitPath]:
+def _reconstruct_paths(path_data: list | dict) -> list[ExploitPath]:
+    if isinstance(path_data, list):
+        raw_paths = path_data
+    else:
+        raw_paths = path_data.get("paths", [])
     paths = []
-    for p in path_data.get("paths", []):
+    for p in raw_paths:
         if not p.get("is_exploitable"):
             continue
         source = SourceTag(
@@ -68,7 +72,25 @@ def run(repo_path: Path, path_data: dict, cve_catalog: dict | None = None) -> di
     max_paths = config.get("pipeline.max_llm_paths", 500)
     temperature = config.get("pipeline.llm_temperature", 0.3)
 
-    exploitable_paths = _reconstruct_paths(path_data)
+    paths_raw = path_data.get("paths", [])
+    if not paths_raw and path_data.get("paths_count"):
+        import json
+        checkpoint_dir = repo_path.parent / "data" / "checkpoints"
+        from src.utils.file_utils import repo_checkpoint_key
+        ck = repo_checkpoint_key(repo_path)
+        jsonl_path = checkpoint_dir / ck / "path_enum.jsonl"
+        if jsonl_path.exists():
+            logger.info(f"  Loading full paths from {jsonl_path}...")
+            paths_raw = []
+            with open(jsonl_path, encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        paths_raw.append(json.loads(line))
+                    except Exception:
+                        continue
+            logger.info(f"  Loaded {len(paths_raw)} paths from JSONL")
+
+    exploitable_paths = _reconstruct_paths(paths_raw if paths_raw else path_data)
     logger.info(f"  Reconstructed {len(exploitable_paths)} potentially exploitable paths")
     if cve_catalog:
         logger.info(f"  CVE catalog available: {cve_catalog.get('count', 0)} CVEs for context injection")

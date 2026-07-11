@@ -219,7 +219,26 @@ class Orchestrator:
     def _save_checkpoint(self, step_num: int | str, filename: str, result: Any):
         output_path = self.checkpoint_dir / filename
         if filename.endswith(".json"):
-            _safe_write(output_path, json.dumps(result, indent=2, default=str))
+            try:
+                serialized = json.dumps(result, indent=2, default=str)
+                _safe_write(output_path, serialized)
+            except MemoryError:
+                logger.warning(f"  Result too large for single JSON write ({filename}). "
+                               f"Writing streaming summary instead.")
+                if isinstance(result, dict):
+                    summary = {}
+                    for k, v in result.items():
+                        if isinstance(v, list) and len(v) > 50000:
+                            summary[k + "_count"] = len(v)
+                            summary[k + "_sample"] = v[:1000]
+                        else:
+                            summary[k] = v
+                    _safe_write(output_path, json.dumps(summary, indent=2, default=str))
+                    logger.warning(f"  Full paths saved to: {output_path.with_suffix('.jsonl')}")
+                    if "paths" in result and isinstance(result["paths"], list):
+                        with open(output_path.with_suffix(".jsonl"), "w", encoding="utf-8") as f:
+                            for p in result["paths"]:
+                                f.write(json.dumps(p, default=str) + "\n")
         elif isinstance(result, str):
             _safe_write(output_path, result)
 

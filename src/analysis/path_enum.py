@@ -187,6 +187,7 @@ class PathEnumerator:
 
         all_paths: list[ExploitPath] = []
         path_id = 0
+        seen_combos: set[tuple[str, int, str, int, str]] = set()
 
         for source_file, source_list in sources_by_file.items():
             for source in source_list:
@@ -210,6 +211,10 @@ class PathEnumerator:
                                     max_paths=self.max_paths_per_pair,
                                 )
                                 for path in paths:
+                                    combo = (source.file, source.line, sink.file, sink.line, sink.category)
+                                    if combo in seen_combos:
+                                        continue
+                                    seen_combos.add(combo)
                                     exploit_path = self._build_exploit_path(
                                         path_id=path_id,
                                         source=source, sink=sink,
@@ -231,6 +236,10 @@ class PathEnumerator:
                                 pass
                             elif has_source_func:
                                 for source_key in source_func_keys:
+                                    combo = (source.file, source.line, sink.file, sink.line, sink.category)
+                                    if combo in seen_combos:
+                                        continue
+                                    seen_combos.add(combo)
                                     exploit_path = self._build_exploit_path(
                                         path_id=path_id,
                                         source=source, sink=sink,
@@ -241,6 +250,10 @@ class PathEnumerator:
                                         all_paths.append(exploit_path)
                                         path_id += 1
                             else:
+                                combo = (source.file, source.line, sink.file, sink.line, sink.category)
+                                if combo in seen_combos:
+                                    continue
+                                seen_combos.add(combo)
                                 exploit_path = ExploitPath(
                                     path_id=f"P{path_id}",
                                     source=source, sink=sink,
