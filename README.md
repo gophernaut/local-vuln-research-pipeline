@@ -4,7 +4,7 @@
 
 # LVRP - Local Vuln Research Pipeline
 
-Exhaustive LLM-driven whitebox vulnerability research pipeline that finds every single vulnerability in any source code. Built on a code graph + LLM hybrid architecture that enumerates and validates all source-to-sink paths.
+Exhaustive LLM-driven whitebox vulnerability research pipeline that finds vulnerabilities in any source code. Built on a code graph + LLM hybrid architecture that enumerates and validates all source-to-sink paths.
 
 Scales from small scripts to enterprise codebases: Linux Kernel, VSCode, Microsoft Agent Framework, GitHub Desktop.
 
