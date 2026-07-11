@@ -241,18 +241,10 @@ def analyze_paths_with_llm(
 
     deterministic_results: list[PathAnalysisResult] = []
     llm_candidates: list[ExploitPath] = []
+    low_priority: list[ExploitPath] = []
 
     seen_combos = set()
     for path in paths:
-        if not path.is_exploitable:
-            deterministic_results.append(_make_path_result(
-                path, "BLOCKED", 0.95,
-                "Path marked non-exploitable by static analysis — sink not in last "
-                "function on path, or no reachable call graph connection.",
-                "", path.sink.severity, "", "auto",
-            ))
-            continue
-
         combo_key = (
             path.source.file, path.source.line,
             path.sink.file, path.sink.line, path.sink.category,
@@ -262,39 +254,39 @@ def analyze_paths_with_llm(
             continue
         seen_combos.add(combo_key)
 
+        if not path.is_exploitable:
+            deterministic_results.append(_make_path_result(
+                path, "BLOCKED", 0.95,
+                "Sink is not in the last function on the call path — structurally unreachable.",
+                "", path.sink.severity, "", "auto",
+            ))
+            continue
+
         has_real_path = _has_real_function_path(path.steps)
         sink_reached = _has_sink_reach(path)
 
-        if path.is_blocked_by_sanitizer:
-            deterministic_results.append(_make_path_result(
-                path, "BLOCKED", 0.90,
-                "Blocked by sanitizer(s) on the path. Taxonomy-matched sanitizer "
-                f"protects against {path.sink.category}.",
-                "", path.sink.severity, "", "auto",
-            ))
-        elif not has_real_path and not sink_reached:
-            conf = 0.30
-            deterministic_results.append(_make_path_result(
-                path, "BLOCKED", conf,
-                "Module-level sink with no function context or taint trace. "
-                "Source and sink may be in the same file but no direct data flow is traceable.",
-                "", path.sink.severity, "", "auto",
-            ))
+        if not has_real_path and not sink_reached:
+            low_priority.append(path)
         else:
             llm_candidates.append(path)
 
-    logger.info(f"  Dedup: {len(paths)} raw → {len(seen_combos)} unique (+{len(deterministic_results)} auto-classified, "
-                f"{len(llm_candidates)} need LLM)")
+    all_llm = llm_candidates + low_priority
 
-    if max_paths > 0 and len(llm_candidates) > max_paths:
-        logger.warning(f"  {len(llm_candidates)} paths need LLM but max_llm_paths={max_paths}. "
+    logger.info(f"  Dedup: {len(paths)} raw → {len(seen_combos)} unique "
+                f"(+{len(deterministic_results)} structurally invalid, "
+                f"{len(llm_candidates)} direct, {len(low_priority)} module-level)")
+
+    if max_paths > 0 and len(all_llm) > max_paths:
+        logger.warning(f"  {len(all_llm)} paths need LLM but max_llm_paths={max_paths}. "
                        f"Sampling top {max_paths}. Set max_llm_paths: 0 in config.yaml for unlimited.")
 
         scored = []
         for p in llm_candidates:
             sev = sev_value.get(p.sink.severity.upper(), 0)
-            sanitizer_penalty = 0 if len(p.sanitizers_on_path) == 0 else -2
-            scored.append((sev + sanitizer_penalty, p))
+            scored.append((sev + 5, p))
+        for p in low_priority:
+            sev = sev_value.get(p.sink.severity.upper(), 0)
+            scored.append((sev, p))
         scored.sort(key=lambda x: x[0], reverse=True)
 
         seen_sinks = set()
@@ -313,9 +305,9 @@ def analyze_paths_with_llm(
                     priority.append(p)
                     if len(priority) >= max_paths:
                         break
-        llm_candidates = priority
+        all_llm = priority
 
-    function_sources = _load_function_sources(llm_candidates, repo_path)
+    function_sources = _load_function_sources(all_llm, repo_path)
 
     client = LLMClient()
     llm_results = []
@@ -339,7 +331,7 @@ DECISION CRITERIA:
 Be specific. Cite exact lines. Don't pad with caveats. Make a decision.
 """
 
-    for i, path in enumerate(llm_candidates):
+    for i, path in enumerate(all_llm):
         if not path.is_exploitable:
             continue
 
@@ -402,7 +394,7 @@ Be specific. Cite exact lines. Don't pad with caveats. Make a decision.
         ))
 
         if (i + 1) % 50 == 0:
-            logger.info(f"  LLM analyzed {i + 1}/{len(llm_candidates)} paths")
+            logger.info(f"  LLM analyzed {i + 1}/{len(all_llm)} paths")
 
     all_results = deterministic_results + llm_results
     verified = sum(1 for r in all_results if r.verdict == "VERIFIED_EXPLOITABLE")
